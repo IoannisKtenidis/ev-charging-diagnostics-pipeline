@@ -228,10 +228,6 @@ We welcome contributions! Please follow these guidelines:
 
 ---
 
-## Acknowledgments & Funding
-This project was co-financed by the European Union under the **NextGenerationEU** initiative, supporting the development of intelligent green mobility networks and sustainable charging station diagnostics.
-
----
 
 ## License
 Distributed under the **MIT License**. See `LICENSE` for more information.
