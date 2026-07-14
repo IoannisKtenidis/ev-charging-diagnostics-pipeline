@@ -23,8 +23,7 @@ An end-to-end, real-time anomaly detection and diagnostic pipeline for electric 
 8. [API & Metrics](#api--metrics)
 9. [Maintainers & Contributors](#maintainers--contributors)
 10. [Contributing](#contributing)
-11. [Acknowledgments & Funding](#acknowledgments--funding)
-12. [License](#license)
+11. [License](#license)
 
 ---
 
