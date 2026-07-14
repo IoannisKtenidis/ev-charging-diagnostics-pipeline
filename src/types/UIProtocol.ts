@@ -1,0 +1,121 @@
+import type { JsonObject } from './JsonType.js'
+import type { UUIDv4 } from './UUID.js'
+import type { BroadcastChannelResponsePayload } from './WorkerBroadcastChannel.js'
+
+export enum ApplicationProtocol {
+  HTTP = 'http',
+  MCP = 'mcp',
+  WS = 'ws',
+}
+
+export enum AuthenticationType {
+  BASIC_AUTH = 'basic-auth',
+  PROTOCOL_BASIC_AUTH = 'protocol-basic-auth',
+}
+
+export enum ProcedureName {
+  ADD_CHARGING_STATIONS = 'addChargingStations',
+  AUTHORIZE = 'authorize',
+  BOOT_NOTIFICATION = 'bootNotification',
+  CLOSE_CONNECTION = 'closeConnection',
+  DATA_TRANSFER = 'dataTransfer',
+  DELETE_CHARGING_STATIONS = 'deleteChargingStations',
+  DIAGNOSTICS_STATUS_NOTIFICATION = 'diagnosticsStatusNotification',
+  FIRMWARE_STATUS_NOTIFICATION = 'firmwareStatusNotification',
+  GET_15118_EV_CERTIFICATE = 'get15118EVCertificate',
+  GET_CERTIFICATE_STATUS = 'getCertificateStatus',
+  HEARTBEAT = 'heartbeat',
+  LIST_CHARGING_STATIONS = 'listChargingStations',
+  LIST_TEMPLATES = 'listTemplates',
+  LOCK_CONNECTOR = 'lockConnector',
+  LOG_STATUS_NOTIFICATION = 'logStatusNotification',
+  METER_VALUES = 'meterValues',
+  NOTIFY_CUSTOMER_INFORMATION = 'notifyCustomerInformation',
+  NOTIFY_REPORT = 'notifyReport',
+  OPEN_CONNECTION = 'openConnection',
+  PERFORMANCE_STATISTICS = 'performanceStatistics',
+  SECURITY_EVENT_NOTIFICATION = 'securityEventNotification',
+  SET_SUPERVISION_URL = 'setSupervisionUrl',
+  SIGN_CERTIFICATE = 'signCertificate',
+  SIMULATOR_STATE = 'simulatorState',
+  START_AUTOMATIC_TRANSACTION_GENERATOR = 'startAutomaticTransactionGenerator',
+  START_CHARGING_STATION = 'startChargingStation',
+  START_SIMULATOR = 'startSimulator',
+  /** OCPP 1.6 only. Use TRANSACTION_EVENT for OCPP 2.0.x. */
+  START_TRANSACTION = 'startTransaction',
+  STATUS_NOTIFICATION = 'statusNotification',
+  STOP_AUTOMATIC_TRANSACTION_GENERATOR = 'stopAutomaticTransactionGenerator',
+  STOP_CHARGING_STATION = 'stopChargingStation',
+  STOP_SIMULATOR = 'stopSimulator',
+  /** OCPP 1.6 only. Use TRANSACTION_EVENT for OCPP 2.0.x. */
+  STOP_TRANSACTION = 'stopTransaction',
+  /** OCPP 2.0.x only. Use START_TRANSACTION / STOP_TRANSACTION for OCPP 1.6. */
+  TRANSACTION_EVENT = 'transactionEvent',
+  UNLOCK_CONNECTOR = 'unlockConnector',
+}
+
+export enum Protocol {
+  UI = 'ui',
+}
+
+export enum ProtocolVersion {
+  '0.0.1' = '0.0.1',
+}
+
+export enum ResponseStatus {
+  FAILURE = 'failure',
+  SUCCESS = 'success',
+}
+
+export enum ServerNotification {
+  REFRESH = 'refresh',
+}
+
+/**
+ * Origin of a UI service request. Drives broadcast-response classification:
+ * `INTERNAL` requests originate from `AbstractUIServer.sendInternalRequest`
+ * (e.g. `Bootstrap.doStop`) and have no transport-side response handler.
+ * `TRANSPORT` requests originate from a UI client (WebSocket/HTTP/MCP).
+ */
+export enum UIRequestOrigin {
+  INTERNAL = 'internal',
+  TRANSPORT = 'transport',
+}
+
+export type ProtocolNotification = [ServerNotification]
+
+export type ProtocolRequest = [UUIDv4, ProcedureName, RequestPayload]
+
+/**
+ * Signature of any UI service request handler stored in the dispatch map.
+ * Sync or async; may return a payload or nothing. The optional `context`
+ * carries the request origin so broadcast handlers can classify late responses.
+ */
+export type ProtocolRequestHandler = (
+  uuid: UUIDv4,
+  procedureName: ProcedureName,
+  payload: RequestPayload,
+  context?: UIRequestContext
+) => Promise<ResponsePayload | undefined> | ResponsePayload | undefined
+
+export type ProtocolResponse = [UUIDv4, ResponsePayload]
+
+export interface RequestPayload extends JsonObject {
+  connectorIds?: number[]
+  hashIds?: string[]
+}
+
+export interface ResponsePayload extends JsonObject {
+  hashIdsFailed?: string[]
+  hashIdsSucceeded?: string[]
+  responsesFailed?: BroadcastChannelResponsePayload[]
+  status: ResponseStatus
+}
+
+/**
+ * Context carried alongside a UI protocol request. Currently records only the
+ * request origin; additive fields are non-breaking.
+ */
+export interface UIRequestContext {
+  readonly origin: UIRequestOrigin
+}

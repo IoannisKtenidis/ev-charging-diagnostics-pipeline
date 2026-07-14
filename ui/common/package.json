@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json.schemastore.org/package",
+  "name": "ui-common",
+  "version": "4.10.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.9.0"
+  },
+  "volta": {
+    "node": "24.18.0",
+    "pnpm": "11.9.0"
+  },
+  "packageManager": "pnpm@11.9.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit --skipLibCheck",
+    "clean:dist": "pnpm exec rimraf dist",
+    "clean:node_modules": "pnpm exec rimraf node_modules",
+    "lint": "cross-env TIMING=1 eslint --cache .",
+    "lint:fix": "cross-env TIMING=1 eslint --cache --fix .",
+    "format": "prettier --cache --write .; eslint --cache --fix .",
+    "test": "cross-env NODE_ENV=test node --import tsx --test --test-force-exit 'tests/**/*.test.ts'",
+    "test:coverage": "mkdir -p coverage && cross-env NODE_ENV=test node --import tsx --test --test-force-exit --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-reporter=lcov --test-reporter-destination=coverage/lcov.info 'tests/**/*.test.ts'",
+    "typecheck": "tsc --noEmit --skipLibCheck"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {}
+}

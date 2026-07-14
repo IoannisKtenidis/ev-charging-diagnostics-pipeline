@@ -1,0 +1,113 @@
+{
+  "$schemaVersion": 1,
+  "idTagsFile": "idtags.json",
+  "baseName": "CS-BASIC",
+  "chargePointModel": "Simulator simple",
+  "chargePointVendor": "Ovomaltin",
+  "power": 75000,
+  "powerUnit": "W",
+  "powerSharedByConnectors": true,
+  "currentOutType": "DC",
+  "numberOfConnectors": 3,
+  "randomConnectors": false,
+  "Configuration": {
+    "configurationKey": [
+      {
+        "key": "MeterValuesSampledData",
+        "readonly": false,
+        "value": "SoC,Energy.Active.Import.Register,Voltage"
+      },
+      {
+        "key": "MeterValueSampleInterval",
+        "readonly": false,
+        "value": "30"
+      },
+      {
+        "key": "SupportedFeatureProfiles",
+        "readonly": true,
+        "value": "Core,FirmwareManagement,LocalAuthListManagement,SmartCharging,RemoteTrigger,Reservation"
+      },
+      {
+        "key": "LocalAuthListEnabled",
+        "readonly": false,
+        "value": "false"
+      },
+      {
+        "key": "AuthorizeRemoteTxRequests",
+        "readonly": false,
+        "value": "false"
+      },
+      {
+        "key": "WebSocketPingInterval",
+        "readonly": false,
+        "value": "60"
+      },
+      {
+        "key": "ReserveConnectorZeroSupported",
+        "readonly": false,
+        "value": "false"
+      }
+    ]
+  },
+  "AutomaticTransactionGenerator": {
+    "enable": true,
+    "minDuration": 60,
+    "maxDuration": 80,
+    "minDelayBetweenTwoTransactions": 15,
+    "maxDelayBetweenTwoTransactions": 30,
+    "probabilityOfStart": 1,
+    "stopAfterHours": 0.3,
+    "requireAuthorize": true
+  },
+  "Connectors": {
+    "0": {},
+    "1": {
+      "bootStatus": "Available",
+      "maximumPower": 75000,
+      "MeterValues": [
+        {
+          "unit": "Percent",
+          "context": "Sample.Periodic",
+          "measurand": "SoC",
+          "location": "EV"
+        },
+        {
+          "unit": "Wh",
+          "context": "Sample.Periodic"
+        }
+      ]
+    },
+    "2": {
+      "bootStatus": "Preparing",
+      "maximumPower": 75000,
+      "MeterValues": [
+        {
+          "unit": "Percent",
+          "context": "Sample.Periodic",
+          "measurand": "SoC",
+          "location": "EV"
+        },
+        {
+          "unit": "Wh",
+          "context": "Sample.Periodic"
+        }
+      ]
+    },
+    "3": {
+      "bootStatus": "Faulted",
+      "maximumPower": 75000,
+      "MeterValues": [
+        {
+          "unit": "Percent",
+          "context": "Sample.Periodic",
+          "measurand": "SoC",
+          "location": "EV"
+        },
+        {
+          "unit": "Wh",
+          "context": "Sample.Periodic"
+        }
+      ]
+    }
+  }
+}

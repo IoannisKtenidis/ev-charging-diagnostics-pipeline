@@ -1,0 +1,72 @@
+schema: spec-driven
+
+context: |
+  ## Project
+  e-Mobility Charging Stations Simulator - Node.js software to simulate and scale
+  charging stations based on the OCPP-J protocol as part of SAP e-Mobility solution.
+
+  ## Monorepo Structure
+  4 TypeScript packages (pnpm workspace) + 1 Python project (Poetry):
+  - Root Simulator (`/`): Node.js/TypeScript OCPP simulator
+  - UI Common (`/ui/common`): Shared TypeScript library (types, WebSocket client, utilities)
+  - CLI (`/ui/cli`): Command-line tool for managing the simulator (Commander.js, esbuild)
+  - Web UI (`/ui/web`): Vue 3 + Vite dashboard
+  - OCPP Mock Server (`/tests/ocpp-server`): Python OCPP 2.0.1 mock server
+
+  ## Tech Stack
+  - Simulator: Node.js >=22.0.0, TypeScript (strict), pnpm >=10.9.0, esbuild, Node.js native test runner
+  - UI Common: Node.js >=22.0.0, TypeScript, pnpm, source-only package (no build artifacts)
+  - CLI: Node.js >=22.0.0, TypeScript, pnpm, esbuild, Node.js native test runner
+  - Web UI: Vue 3, Vite, Vitest
+  - OCPP Server: Python >=3.12, Poetry >=2.0, pytest
+
+  ## OCPP Protocol Support
+  - OCPP 1.6 (JSON/WebSocket)
+  - OCPP 2.0.x (JSON/WebSocket)
+
+  ## Architecture
+  - src/charging-station/: Core charging station implementation
+  - src/charging-station/ocpp/: OCPP protocol (separate component from charging-station)
+    - ocpp/1.6/: OCPP 1.6 specific code
+    - ocpp/2.0/: OCPP 2.0.x specific code (separate sub-component from 1.6)
+    - ocpp/auth/: Authentication subsystem
+  - src/types/: TypeScript type definitions
+  - src/utils/: Utility functions
+  - src/worker/: Worker thread management (self-contained, portable)
+  - src/performance/: Performance statistics
+  - src/exception/: Error classes (BaseError, OCPPError)
+  - tests/: Test files mirroring source structure
+  - ui/web/: Vue 3 dashboard (independent sub-project)
+  - ui/common/: Shared TypeScript library for UI packages
+  - ui/cli/: CLI tool for simulator management
+  - tests/ocpp-server/: Python OCPP mock server (independent sub-project)
+
+  ## Key Conventions
+  - Enums: `enum` only (no `const enum`); `as const` for cross-version OCPP enum merges
+  - Imports: `import type` enforced by ESLint; `node:` prefix for builtins; `.js` extension on relative imports
+  - Date handling: `convertToDate()` for all incoming JSON dates (never `new Date(externalString)`)
+  - Naming: camelCase for variables/functions, PascalCase for classes/types/enums; `...Date` suffix for Date objects, `...Time` for numeric timestamps
+  - Error handling: Typed errors (BaseError, OCPPError); avoid generic Error; `instanceof` guards
+  - Null safety: Optional chaining (`?.`) and nullish coalescing (`??`); avoid non-null assertions (`!`)
+  - Type safety: Explicit types; no `as any`, `@ts-ignore`, `@ts-expect-error`
+  - Async: Prefer async/await; fire-and-forget wrapped in `void`
+  - OCPP: Follow standard naming exactly; version-prefix enums (OCPP16/OCPP20)
+  - Commits: Conventional Commits format; header max 100 chars
+  - Testing: See tests/TEST_STYLE_GUIDE.md
+
+  ## Quality Gates
+  - Simulator: pnpm format, pnpm typecheck, pnpm build, pnpm test
+  - UI Common (from ui/common/): pnpm format, pnpm typecheck, pnpm test
+  - CLI (from ui/cli/): pnpm format, pnpm typecheck, pnpm build, pnpm test
+  - Web UI (from ui/web/): pnpm format, pnpm typecheck, pnpm build, pnpm test:coverage
+  - OCPP Server (from tests/ocpp-server/): poetry run task format/lint/typecheck/test
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours

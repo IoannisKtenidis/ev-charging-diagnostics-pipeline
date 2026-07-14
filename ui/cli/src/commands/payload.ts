@@ -1,0 +1,26 @@
+import type { RequestPayload } from 'ui-common'
+
+export const PAYLOAD_OPTION = '-p, --payload <json|@file|->'
+export const PAYLOAD_DESC = 'JSON payload: inline string, @filename, or - for stdin'
+
+export const buildHashIdsPayload = (hashIds: string[]): RequestPayload =>
+  hashIds.length > 0 ? { hashIds } : {}
+
+export const pickDefined = (
+  source: Record<string, unknown>,
+  keyMap: Record<string, string>
+): Record<string, unknown> => {
+  const result: Record<string, unknown> = {}
+  for (const [sourceKey, targetKey] of Object.entries(keyMap)) {
+    if (source[sourceKey] != null) {
+      result[targetKey] = source[sourceKey]
+    }
+  }
+  return result
+}
+
+export const pickPresent = (
+  source: Record<string, unknown>,
+  keys: string[]
+): Record<string, unknown> =>
+  Object.fromEntries(keys.filter(k => source[k] != null).map(k => [k, source[k]]))

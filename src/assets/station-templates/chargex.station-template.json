@@ -1,0 +1,105 @@
+{
+  "$schemaVersion": 1,
+  "idTagsFile": "idtags.json",
+  "baseName": "CS-CHARGEX",
+  "chargePointModel": "Aqueduct 1.0",
+  "chargePointVendor": "ChargeX GmbH",
+  "firmwareVersionPattern": "^MCC (0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*); SCC \\[(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*), (0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\]$",
+  "firmwareVersion": "MCC 1.2.0; SCC [0.12.0, 0.13.0]",
+  "power": 22080,
+  "powerUnit": "W",
+  "numberOfConnectors": 1,
+  "voltageOut": 230,
+  "beginEndMeterValues": true,
+  "outOfOrderEndMeterValues": true,
+  "firmwareUpgrade": {
+    "versionUpgrade": {
+      "patternGroup": 3
+    }
+  },
+  "commandsSupport": {
+    "incomingCommands": {
+      "Reset": true,
+      "GetConfiguration": true,
+      "ChangeConfiguration": true,
+      "ClearCache": true,
+      "ChangeAvailability": false,
+      "UnlockConnector": true,
+      "SetChargingProfile": false,
+      "ClearChargingProfile": false,
+      "RemoteStartTransaction": true,
+      "RemoteStopTransaction": true,
+      "GetDiagnostics": false,
+      "TriggerMessage": false
+    }
+  },
+  "messageTriggerSupport": {
+    "BootNotification": true,
+    "Heartbeat": true,
+    "StatusNotification": false
+  },
+  "Configuration": {
+    "configurationKey": [
+      {
+        "key": "AllowOfflineTxForUnknownId",
+        "readonly": false,
+        "value": "True"
+      },
+      {
+        "key": "AuthorizeRemoteTxRequests",
+        "value": "True",
+        "readonly": true
+      },
+      {
+        "key": "LocalAuthListEnabled",
+        "value": "False",
+        "readonly": true
+      },
+      {
+        "key": "LocalPreAuthorize",
+        "value": "False",
+        "readonly": true
+      },
+      {
+        "key": "MeterValueSampleInterval",
+        "readonly": false,
+        "value": "300"
+      },
+      {
+        "key": "TransactionMessageAttempts",
+        "readonly": false,
+        "value": "3"
+      },
+      {
+        "key": "TransactionMessageRetryInterval",
+        "readonly": false,
+        "value": "20"
+      },
+      {
+        "key": "ReserveConnectorZeroSupported",
+        "readonly": false,
+        "value": "false"
+      }
+    ]
+  },
+  "AutomaticTransactionGenerator": {
+    "enable": false,
+    "minDuration": 60,
+    "maxDuration": 80,
+    "minDelayBetweenTwoTransactions": 15,
+    "maxDelayBetweenTwoTransactions": 30,
+    "probabilityOfStart": 1,
+    "stopAfterHours": 0.3,
+    "requireAuthorize": true
+  },
+  "Connectors": {
+    "0": {},
+    "1": {
+      "MeterValues": [
+        {
+          "unit": "Wh"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,121 @@
+import type { IBootstrap } from '../IBootstrap.js'
+import type { AbstractUIServer } from './AbstractUIServer.js'
+
+import { BaseError } from '../../exception/index.js'
+import {
+  ApplicationProtocol,
+  ApplicationProtocolVersion,
+  AuthenticationType,
+  ConfigurationSection,
+  type UIServerConfiguration,
+} from '../../types/index.js'
+import { logger, logPrefix } from '../../utils/index.js'
+import { UIHttpServer } from './UIHttpServer.js'
+import { UIMCPServer } from './UIMCPServer.js'
+import { isLoopback } from './UIServerNet.js'
+import { UIWebSocketServer } from './UIWebSocketServer.js'
+
+const moduleName = 'UIServerFactory'
+
+// eslint-disable-next-line @typescript-eslint/no-extraneous-class
+export class UIServerFactory {
+  private constructor () {
+    // This is intentional
+  }
+
+  public static getUIServerImplementation (
+    uiServerConfiguration: UIServerConfiguration,
+    bootstrap: IBootstrap
+  ): AbstractUIServer {
+    if (
+      uiServerConfiguration.authentication?.enabled === true &&
+      !Object.values(AuthenticationType).includes(uiServerConfiguration.authentication.type)
+    ) {
+      throw new BaseError(
+        `Unknown authentication type '${uiServerConfiguration.authentication.type}' in '${ConfigurationSection.uiServer}' configuration section`
+      )
+    }
+    if (
+      uiServerConfiguration.type === ApplicationProtocol.HTTP &&
+      uiServerConfiguration.authentication?.enabled === true &&
+      uiServerConfiguration.authentication.type === AuthenticationType.PROTOCOL_BASIC_AUTH
+    ) {
+      throw new BaseError(
+        `'${uiServerConfiguration.authentication.type}' authentication type with application protocol type '${uiServerConfiguration.type}' is not supported in '${ConfigurationSection.uiServer}' configuration section`
+      )
+    }
+    if (
+      uiServerConfiguration.authentication?.enabled === true &&
+      uiServerConfiguration.authentication.username?.includes(':') === true
+    ) {
+      throw new BaseError(
+        `Authentication username in '${ConfigurationSection.uiServer}' configuration section must not contain ':' (RFC 7617)`
+      )
+    }
+    if (
+      uiServerConfiguration.authentication?.enabled !== true &&
+      !isLoopback(uiServerConfiguration.options?.host ?? '')
+    ) {
+      const logMsg = `Non loopback address in '${ConfigurationSection.uiServer}' configuration section without authentication enabled. This is not recommended`
+      logger.warn(`${UIServerFactory.logPrefix(moduleName, 'getUIServerImplementation')} ${logMsg}`)
+    }
+    if (
+      (uiServerConfiguration.type === ApplicationProtocol.WS ||
+        uiServerConfiguration.type === ApplicationProtocol.MCP) &&
+      uiServerConfiguration.version !== ApplicationProtocolVersion.VERSION_11
+    ) {
+      const logMsg = `Only version ${ApplicationProtocolVersion.VERSION_11} with application protocol type '${uiServerConfiguration.type}' is supported in '${ConfigurationSection.uiServer}' configuration section. Falling back to version ${ApplicationProtocolVersion.VERSION_11}`
+      logger.warn(`${UIServerFactory.logPrefix(moduleName, 'getUIServerImplementation')} ${logMsg}`)
+      uiServerConfiguration.version = ApplicationProtocolVersion.VERSION_11
+    }
+    if (
+      uiServerConfiguration.type === ApplicationProtocol.MCP &&
+      uiServerConfiguration.authentication?.enabled === true &&
+      uiServerConfiguration.authentication.type === AuthenticationType.PROTOCOL_BASIC_AUTH
+    ) {
+      throw new BaseError(
+        `'${uiServerConfiguration.authentication.type}' authentication type with application protocol type '${uiServerConfiguration.type}' is not supported in '${ConfigurationSection.uiServer}' configuration section`
+      )
+    }
+    switch (uiServerConfiguration.type) {
+      case ApplicationProtocol.HTTP: {
+        const logMsg = `Application protocol type '${uiServerConfiguration.type}' is deprecated in '${ConfigurationSection.uiServer}' configuration section. Use '${ApplicationProtocol.MCP}' instead`
+        logger.warn(
+          `${UIServerFactory.logPrefix(moduleName, 'getUIServerImplementation')} ${logMsg}`
+        )
+        // eslint-disable-next-line @typescript-eslint/no-deprecated
+        return new UIHttpServer(uiServerConfiguration, bootstrap)
+      }
+      case ApplicationProtocol.MCP:
+        return new UIMCPServer(uiServerConfiguration, bootstrap)
+      case ApplicationProtocol.WS:
+      default:
+        if (
+          !Object.values(ApplicationProtocol).includes(
+            uiServerConfiguration.type as ApplicationProtocol
+          )
+        ) {
+          // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+          const logMsg = `Unknown application protocol type '${uiServerConfiguration.type}' in '${
+            ConfigurationSection.uiServer
+            // eslint-disable-next-line @typescript-eslint/no-base-to-string
+          }' configuration section from values '${ApplicationProtocol.toString()}', defaulting to '${
+            ApplicationProtocol.WS
+          }'`
+          logger.warn(
+            `${UIServerFactory.logPrefix(moduleName, 'getUIServerImplementation')} ${logMsg}`
+          )
+        }
+        return new UIWebSocketServer(uiServerConfiguration, bootstrap)
+    }
+  }
+
+  private static readonly logPrefix = (modName?: string, methodName?: string): string => {
+    const logMsgPrefix = 'UI Server'
+    const logMsg =
+      modName != null && methodName != null
+        ? ` ${logMsgPrefix} | ${modName}.${methodName}:`
+        : ` ${logMsgPrefix} |`
+    return logPrefix(logMsg)
+  }
+}

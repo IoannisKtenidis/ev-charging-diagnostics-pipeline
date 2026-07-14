@@ -1,0 +1,15 @@
+applications:
+  - name: e-mobility-charging-stations-simulator
+    memory: 1G
+    disk_quota: 4G
+    instances: 1
+    buildpacks:
+      - https://github.com/cloudfoundry/nodejs-buildpack
+    # no-route: true
+    routes:
+      - route: e-mobility-charging-stations-simulator.cfapps.sap.hana.ondemand.com
+    health-check-type: process
+    command: node dist/start.js
+    env:
+      # OPTIMIZE_MEMORY: true
+      NODE_OPTIONS: --enable-source-maps --max-old-space-size=768

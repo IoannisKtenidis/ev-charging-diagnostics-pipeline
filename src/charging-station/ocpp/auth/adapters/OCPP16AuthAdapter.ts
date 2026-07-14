@@ -1,0 +1,395 @@
+import type { ChargingStation } from '../../../../charging-station/index.js'
+import type { JsonObject } from '../../../../types/index.js'
+import type { OCPPAuthAdapter } from '../interfaces/OCPPAuthService.js'
+import type {
+  AuthConfiguration,
+  AuthorizationResult,
+  AuthRequest,
+  Identifier,
+} from '../types/AuthTypes.js'
+
+import { getConfigurationKey } from '../../../../charging-station/index.js'
+import {
+  type OCPP16AuthorizeRequest,
+  type OCPP16AuthorizeResponse,
+  OCPP16StandardParametersKey,
+  OCPPVersion,
+  RequestCommand,
+  StandardParametersKey,
+} from '../../../../types/index.js'
+import {
+  convertToBoolean,
+  convertToIntOrNaN,
+  getErrorMessage,
+  isEmpty,
+  logger,
+  truncateId,
+} from '../../../../utils/index.js'
+import {
+  AuthContext,
+  AuthenticationMethod,
+  AuthorizationStatus,
+  IdentifierType,
+  mapOCPP16Status,
+  mapToOCPP16Status,
+} from '../types/AuthTypes.js'
+import { AuthValidators } from '../utils/AuthValidators.js'
+
+const moduleName = 'OCPP16AuthAdapter'
+
+/**
+ * OCPP 1.6 Authentication Adapter
+ *
+ * Handles authentication for OCPP 1.6 charging stations by translating
+ * between auth types and OCPP 1.6 specific types and protocols.
+ */
+export class OCPP16AuthAdapter implements OCPPAuthAdapter<string> {
+  readonly ocppVersion = OCPPVersion.VERSION_16
+
+  constructor (private readonly chargingStation: ChargingStation) {}
+
+  /**
+   * Perform remote authorization using OCPP 1.6 Authorize message
+   * @param identifier - Identifier containing the idTag to authorize
+   * @param connectorId - Connector ID where authorization is requested
+   * @param transactionId - Active transaction ID if authorizing during a transaction
+   * @returns Authorization result with OCPP 1.6 status mapped to auth format
+   */
+  async authorizeRemote (
+    identifier: Identifier,
+    connectorId?: number,
+    transactionId?: number | string
+  ): Promise<AuthorizationResult> {
+    const methodName = 'authorizeRemote'
+
+    try {
+      logger.debug(
+        `${this.chargingStation.logPrefix()} ${moduleName}.${methodName}: Authorizing identifier '${truncateId(identifier.value)}' via OCPP 1.6`
+      )
+
+      // Mark connector as authorizing if provided
+      if (connectorId != null) {
+        const connectorStatus = this.chargingStation.getConnectorStatus(connectorId)
+        if (connectorStatus != null) {
+          connectorStatus.authorizeIdTag = identifier.value
+        }
+      }
+
+      // Send OCPP 1.6 Authorize request
+      const response = await this.chargingStation.ocppRequestService.requestHandler<
+        OCPP16AuthorizeRequest,
+        OCPP16AuthorizeResponse
+      >(this.chargingStation, RequestCommand.AUTHORIZE, {
+        idTag: identifier.value,
+      })
+
+      // Convert response to auth format
+      const result: AuthorizationResult = {
+        additionalInfo: {
+          connectorId,
+          ocpp16Status: response.idTagInfo.status,
+          transactionId,
+        },
+        expiryDate: response.idTagInfo.expiryDate,
+        isOffline: false,
+        method: AuthenticationMethod.REMOTE_AUTHORIZATION,
+        parentId: response.idTagInfo.parentIdTag,
+        status: mapOCPP16Status(response.idTagInfo.status),
+        timestamp: new Date(),
+      }
+
+      logger.debug(
+        `${this.chargingStation.logPrefix()} ${moduleName}.${methodName}: Remote authorization result: ${result.status}`
+      )
+
+      return result
+    } catch (error) {
+      logger.error(
+        `${this.chargingStation.logPrefix()} ${moduleName}.${methodName}: Remote authorization failed`,
+        error
+      )
+
+      // Return failed authorization result
+      return {
+        additionalInfo: {
+          connectorId,
+          error: getErrorMessage(error),
+          transactionId,
+        },
+        isOffline: false,
+        method: AuthenticationMethod.REMOTE_AUTHORIZATION,
+        status: AuthorizationStatus.INVALID,
+        timestamp: new Date(),
+      }
+    }
+  }
+
+  /**
+   * Convert identifier to OCPP 1.6 idTag string
+   * @param identifier - Identifier to convert
+   * @returns OCPP 1.6 idTag string value
+   */
+  convertFromIdentifier (identifier: Identifier): string {
+    // For OCPP 1.6, we always return the string value
+    return identifier.value
+  }
+
+  /**
+   * Convert OCPP 1.6 idTag to identifier
+   * @param identifier - OCPP 1.6 idTag string to convert
+   * @param additionalData - Optional metadata to include in identifier
+   * @returns Identifier with ID_TAG type
+   */
+  convertToIdentifier (identifier: string, additionalData?: Record<string, unknown>): Identifier {
+    return {
+      additionalInfo: additionalData
+        ? Object.fromEntries(Object.entries(additionalData).map(([k, v]) => [k, String(v)]))
+        : undefined,
+      parentId: additionalData?.parentId as string | undefined,
+      type: IdentifierType.ID_TAG,
+      value: identifier,
+    }
+  }
+
+  /**
+   * Convert authorization result to OCPP 1.6 response format
+   * @param result - Authorization result to convert
+   * @returns OCPP 1.6 AuthorizeResponse with idTagInfo structure
+   */
+  convertToOCPP16Response (result: AuthorizationResult): OCPP16AuthorizeResponse {
+    return {
+      idTagInfo: {
+        expiryDate: result.expiryDate,
+        parentIdTag: result.parentId,
+        status: mapToOCPP16Status(result.status),
+      },
+    }
+  }
+
+  /**
+   * Create authorization request from OCPP 1.6 context
+   * @param idTag - OCPP 1.6 idTag string for authorization
+   * @param connectorId - Connector where authorization is requested
+   * @param transactionId - Transaction ID if in transaction context
+   * @param context - Authorization context string (e.g., 'start', 'stop', 'remote_start')
+   * @returns Auth request with identifier and context information
+   */
+  createAuthRequest (
+    idTag: string,
+    connectorId?: number,
+    transactionId?: number,
+    context?: string
+  ): AuthRequest {
+    const identifier = this.convertToIdentifier(idTag)
+
+    // Map context string to AuthContext enum
+    let authContext: AuthContext
+    switch (context?.toLowerCase()) {
+      case 'remote_start':
+        authContext = AuthContext.REMOTE_START
+        break
+      case 'remote_stop':
+        authContext = AuthContext.REMOTE_STOP
+        break
+      case 'start':
+      case 'transaction_start':
+        authContext = AuthContext.TRANSACTION_START
+        break
+      case 'stop':
+      case 'transaction_stop':
+        authContext = AuthContext.TRANSACTION_STOP
+        break
+      default:
+        authContext = AuthContext.TRANSACTION_START
+    }
+
+    return {
+      allowOffline: this.getOfflineTransactionConfig(),
+      connectorId,
+      context: authContext,
+      identifier,
+      metadata: {
+        ocppVersion: OCPPVersion.VERSION_16,
+        stationId: this.chargingStation.stationInfo?.chargingStationId,
+      },
+      timestamp: new Date(),
+      transactionId: transactionId?.toString(),
+    }
+  }
+
+  /**
+   * @returns Configuration schema object for OCPP 1.6 authorization settings
+   */
+  getConfigurationSchema (): JsonObject {
+    return {
+      properties: {
+        allowOfflineTxForUnknownId: {
+          description: 'Allow offline transactions for unknown IDs',
+          type: 'boolean',
+        },
+        authorizationCacheEnabled: {
+          description: 'Enable authorization cache',
+          type: 'boolean',
+        },
+        authorizationKey: {
+          description: 'Authorization key for local list management',
+          type: 'string',
+        },
+        authorizationTimeout: {
+          description: 'Authorization timeout in seconds',
+          minimum: 1,
+          type: 'number',
+        },
+        // OCPP 1.6 specific configuration keys
+        localAuthListEnabled: {
+          description: 'Enable local authorization list',
+          type: 'boolean',
+        },
+        localPreAuthorize: {
+          description: 'Enable local pre-authorization',
+          type: 'boolean',
+        },
+        remoteAuthorization: {
+          description: 'Enable remote authorization via Authorize message',
+          type: 'boolean',
+        },
+      },
+      required: ['localAuthListEnabled', 'remoteAuthorization'],
+      type: 'object',
+    }
+  }
+
+  /**
+   * Read maximum local auth list entries from OCPP 1.6 LocalAuthListMaxLength config key.
+   * @returns Maximum entries limit, or undefined if not configured
+   */
+  getMaxLocalAuthListEntries (): number | undefined {
+    const configKey = getConfigurationKey(
+      this.chargingStation,
+      OCPP16StandardParametersKey.LocalAuthListMaxLength
+    )
+    if (configKey?.value != null) {
+      const parsed = convertToIntOrNaN(configKey.value)
+      if (!Number.isNaN(parsed) && parsed > 0) {
+        return parsed
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * Get adapter-specific status information
+   * @returns Status object with online state, auth settings, and station identifier
+   */
+  getStatus (): JsonObject {
+    return {
+      isOnline: this.chargingStation.inAcceptedState(),
+      localAuthEnabled: this.chargingStation.getLocalAuthListEnabled(),
+      ocppVersion: this.ocppVersion,
+      remoteAuthEnabled: this.chargingStation.stationInfo?.remoteAuthorization === true,
+      stationId: this.chargingStation.stationInfo?.chargingStationId,
+    }
+  }
+
+  /**
+   * Check if remote authorization is available
+   * @returns True if remote authorization is enabled and station is online
+   */
+  isRemoteAvailable (): boolean {
+    try {
+      // Check if station supports remote authorization
+      const remoteAuthEnabled = this.chargingStation.stationInfo?.remoteAuthorization === true
+
+      // Check if station is online and can communicate
+      const isOnline = this.chargingStation.inAcceptedState()
+
+      return remoteAuthEnabled && isOnline
+    } catch (error) {
+      logger.warn(
+        `${this.chargingStation.logPrefix()} ${moduleName}.isRemoteAvailable: Error checking remote authorization availability`,
+        error
+      )
+      return false
+    }
+  }
+
+  /**
+   * Check if identifier is valid for OCPP 1.6
+   * @param identifier - Identifier to validate
+   * @returns True if identifier has valid ID_TAG type and length within OCPP 1.6 limits
+   */
+  isValidIdentifier (identifier: Identifier): boolean {
+    // OCPP 1.6 idTag validation
+    if (!identifier.value || typeof identifier.value !== 'string') {
+      return false
+    }
+
+    // Check length (OCPP 1.6 spec: max 20 characters)
+    if (isEmpty(identifier.value) || identifier.value.length > AuthValidators.MAX_IDTAG_LENGTH) {
+      return false
+    }
+
+    // Only ID_TAG type is supported in OCPP 1.6
+    if (identifier.type !== IdentifierType.ID_TAG) {
+      return false
+    }
+
+    return true
+  }
+
+  /**
+   * Validate adapter configuration for OCPP 1.6
+   * @param config - Auth configuration to validate
+   * @returns True if configuration has valid auth methods and timeout values
+   */
+  validateConfiguration (config: AuthConfiguration): boolean {
+    try {
+      // Check that at least one authorization method is enabled
+      const hasLocalAuth = config.localAuthListEnabled
+      const hasRemoteAuth = config.remoteAuthorization
+
+      if (!hasLocalAuth && !hasRemoteAuth) {
+        logger.warn(
+          `${this.chargingStation.logPrefix()} ${moduleName}.validateConfiguration: No authorization methods enabled`
+        )
+        return false
+      }
+
+      // Validate timeout values
+      if (config.authorizationTimeout < 1) {
+        logger.warn(
+          `${this.chargingStation.logPrefix()} ${moduleName}.validateConfiguration: Invalid authorization timeout`
+        )
+        return false
+      }
+
+      return true
+    } catch (error) {
+      logger.error(
+        `${this.chargingStation.logPrefix()} ${moduleName}.validateConfiguration: Configuration validation failed`,
+        error
+      )
+      return false
+    }
+  }
+
+  /**
+   * Check if offline transactions are allowed for unknown IDs
+   * @returns True if offline transactions are allowed for unknown IDs
+   */
+  private getOfflineTransactionConfig (): boolean {
+    try {
+      const configKey = getConfigurationKey(
+        this.chargingStation,
+        StandardParametersKey.AllowOfflineTxForUnknownId
+      )
+      return convertToBoolean(configKey?.value)
+    } catch (error) {
+      logger.warn(
+        `${this.chargingStation.logPrefix()} ${moduleName}.getOfflineTransactionConfig: Error getting offline transaction config`,
+        error
+      )
+      return false
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "deno.enable": false,
+  "editor.codeActionsOnSave": {
+    "source.fixAll": "explicit"
+  },
+  "sonarlint.connectedMode.project": {
+    "connectionId": "sap-1",
+    "projectKey": "e-mobility-charging-stations-simulator-webui"
+  },
+  "cSpell.words": [
+    "Avenir",
+    "composables",
+    "corepack",
+    "evse",
+    "evses",
+    "finalhandler",
+    "iccid",
+    "idtag",
+    "imsi",
+    "ocpp",
+    "Parens",
+    "preinstall",
+    "RFID",
+    "rushstack",
+    "webui"
+  ]
+}

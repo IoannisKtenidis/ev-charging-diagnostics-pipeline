@@ -1,0 +1,117 @@
+import process from 'node:process'
+import ora from 'ora'
+import {
+  ConnectionError,
+  type ProcedureName,
+  type RequestPayload,
+  type ResponsePayload,
+  UI_WEBSOCKET_REQUEST_TIMEOUT_MS,
+  type UIServerConfigurationSection,
+  WebSocketClient,
+  type WebSocketFactory,
+} from 'ui-common'
+import { WebSocket as WsWebSocket } from 'ws'
+
+import type { Formatter } from '../output/formatter.js'
+
+import { createWsAdapter } from './ws-adapter.js'
+
+const wsFactory: WebSocketFactory = (url, protocols) =>
+  createWsAdapter(new WsWebSocket(url, protocols))
+
+let activeClient: undefined | WebSocketClient
+let activeSpinner: null | ReturnType<typeof ora> | undefined
+let cleanupInProgress = false
+
+export interface ExecuteOptions {
+  config: UIServerConfigurationSection
+  formatter?: Formatter
+  payload: RequestPayload
+  procedureName: ProcedureName
+  silent?: boolean
+  timeoutMs?: number
+}
+
+export const executeCommand = async (options: ExecuteOptions): Promise<ResponsePayload> => {
+  const { config, formatter, payload, procedureName, silent, timeoutMs } = options
+
+  const client = new WebSocketClient(wsFactory, config, timeoutMs)
+  const { url } = client
+
+  const isInteractive = !silent && process.stderr.isTTY
+  const spinner = isInteractive
+    ? ora({ stream: process.stderr }).start(`Connecting to ${url}`)
+    : null
+
+  activeSpinner = spinner
+  activeClient = client
+
+  const budget = timeoutMs ?? UI_WEBSOCKET_REQUEST_TIMEOUT_MS
+  if (!Number.isFinite(budget) || budget <= 0) {
+    throw new Error(`Invalid timeout: ${String(budget)}ms (must be > 0)`)
+  }
+  const startTime = Date.now()
+
+  let connectTimeoutId: ReturnType<typeof setTimeout> | undefined
+  try {
+    const connectPromise = client.connect()
+    // Prevent unhandled rejection when timeout wins the race and connect rejects later
+    connectPromise.catch(() => undefined)
+    await Promise.race([
+      connectPromise,
+      new Promise<never>((_resolve, reject) => {
+        connectTimeoutId = setTimeout(() => {
+          reject(new Error(`Connection to ${url} timed out`))
+        }, budget)
+      }),
+    ])
+  } catch (error: unknown) {
+    spinner?.fail()
+    client.disconnect()
+    throw new ConnectionError(url, error)
+  } finally {
+    clearTimeout(connectTimeoutId)
+  }
+
+  const remaining = budget - (Date.now() - startTime)
+  if (remaining <= 0) {
+    spinner?.fail()
+    client.disconnect()
+    throw new ConnectionError(url, new Error('Connection consumed entire timeout budget'))
+  }
+
+  try {
+    if (spinner != null) {
+      spinner.text = `Sending ${procedureName}...`
+    }
+    const response: ResponsePayload = await client.sendRequest(procedureName, payload, remaining)
+    spinner?.stop()
+    formatter?.output(response)
+    return response
+  } catch (error: unknown) {
+    spinner?.fail()
+    throw error
+  } finally {
+    activeClient = undefined
+    activeSpinner = undefined
+    client.disconnect()
+  }
+}
+
+export const registerSignalHandlers = (): void => {
+  const cleanup = (code: number): void => {
+    if (cleanupInProgress) return
+    cleanupInProgress = true
+    activeSpinner?.stop()
+    activeClient?.disconnect()
+
+    process.exit(code)
+  }
+
+  process.on('SIGINT', () => {
+    cleanup(130)
+  })
+  process.on('SIGTERM', () => {
+    cleanup(143)
+  })
+}

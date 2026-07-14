@@ -1,0 +1,28 @@
+FROM node:lts-alpine AS builder
+
+# Build dashboard
+WORKDIR /usr/builder
+COPY . ./
+RUN set -ex \
+  && npm install -g --ignore-scripts corepack \
+  && corepack enable \
+  && pnpm install --ignore-scripts --frozen-lockfile \
+  && cp ui/web/docker/config.json ui/web/public/config.json \
+  && pnpm --filter web build
+
+FROM node:lts-alpine
+
+WORKDIR /usr/app
+COPY --from=builder /usr/builder/node_modules /node_modules
+COPY --from=builder /usr/builder/ui/web/package.json ./
+COPY --from=builder /usr/builder/ui/web/node_modules ./node_modules
+COPY --from=builder /usr/builder/ui/web/dist ./dist
+COPY --from=builder /usr/builder/ui/web/start.js ./
+COPY ui/web/docker/run.sh /run.sh
+COPY ui/web/docker/autoconfig.sh /autoconfig.sh
+RUN set -ex \
+  && chmod +x /run.sh \
+  && chmod +x /autoconfig.sh
+
+EXPOSE 3030
+ENTRYPOINT ["/bin/sh", "-c", "/autoconfig.sh && /run.sh"]

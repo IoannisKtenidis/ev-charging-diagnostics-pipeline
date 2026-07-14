@@ -1,0 +1,564 @@
+import type { CircularBuffer } from 'mnemonist'
+
+import {
+  formatDuration,
+  hoursToMinutes,
+  hoursToSeconds,
+  isDate,
+  millisecondsToHours,
+  millisecondsToMinutes,
+  millisecondsToSeconds,
+  minutesToSeconds,
+  secondsToMilliseconds,
+} from 'date-fns'
+import { getRandomValues, randomBytes, randomUUID } from 'node:crypto'
+import { env } from 'node:process'
+
+import {
+  type JsonObject,
+  type JsonType,
+  MapStringifyFormat,
+  MessageType,
+  type TimestampedData,
+  type UUIDv4,
+  WebSocketCloseEventStatusString,
+} from '../types/index.js'
+import { Constants } from './Constants.js'
+
+type NonEmptyArray<T> = [T, ...T[]]
+type ReadonlyNonEmptyArray<T> = readonly [T, ...(readonly T[])]
+
+export const logPrefix = (prefixString = ''): string => {
+  return `${new Date().toLocaleString()}${prefixString}`
+}
+
+/**
+ * Formats a log prefix for direct concatenation with a module/method tag.
+ * @param logPrefixFn - Prefix-producing function. Defaults to `logPrefix` so callers without a
+ *                     module-specific prefix still emit a timestamped log line.
+ * @returns The prefix followed by a single trailing space (e.g. `"<prefix> "`). The trailing space is part of the
+ *          contract: call sites concatenate the result directly with the message body, e.g.
+ *          `` `${formatLogPrefix(fn)}${moduleName}.method: ...` ``.
+ */
+export const formatLogPrefix = (logPrefixFn: () => string = logPrefix): string => {
+  return `${logPrefixFn()} `
+}
+
+export const once = <A extends unknown[], R>(fn: (...args: A) => R): ((...args: A) => R) => {
+  let hasBeenCalled = false
+  let result!: R
+  let thrownError: Error | undefined
+  return (...args: A): R => {
+    if (!hasBeenCalled) {
+      hasBeenCalled = true
+      try {
+        result = fn(...args)
+      } catch (err) {
+        thrownError = err as Error
+      }
+    }
+    if (thrownError != null) {
+      throw thrownError
+    }
+    return result
+  }
+}
+
+export const has = (property: PropertyKey, object: unknown): boolean => {
+  if (object == null || (typeof object !== 'object' && typeof object !== 'function')) {
+    return false
+  }
+  return Object.hasOwn(object, property)
+}
+
+const isPlainObject = (value: unknown): value is object => {
+  return Object.prototype.toString.call(value) === '[object Object]'
+}
+
+export const isJsonObject = (value: unknown): value is JsonObject => {
+  return isPlainObject(value)
+}
+
+/**
+ * Asserts that the given value is a JSON object (non-null, non-array object).
+ * @param value - Value to assert.
+ * @param error - Optional custom error or context message.
+ * @throws {Error | TypeError} The provided error, or a TypeError with the context message.
+ */
+export function assertIsJsonObject (
+  value: unknown,
+  error?: Error | string
+): asserts value is JsonObject {
+  if (!isJsonObject(value)) {
+    if (error instanceof Error) {
+      throw error
+    }
+    throw new TypeError(
+      error != null ? `Expected a JSON object: ${error}` : 'Expected a JSON object'
+    )
+  }
+}
+
+export const isEmpty = (value: unknown): boolean => {
+  if (
+    value == null ||
+    typeof value === 'bigint' ||
+    typeof value === 'boolean' ||
+    typeof value === 'number'
+  ) {
+    return false
+  }
+
+  if (typeof value === 'string') return value.trim().length === 0
+  if (Array.isArray(value)) return value.length === 0
+  if (value instanceof Map) return value.size === 0
+  if (value instanceof Set) return value.size === 0
+  if (isPlainObject(value)) return Object.keys(value).length === 0
+  return false
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
+export const mergeDeepRight = <T extends object, S extends object>(target: T, source: S): T => {
+  const output: Record<string, unknown> = { ...(target as Record<string, unknown>) }
+
+  if (isPlainObject(target) && isPlainObject(source)) {
+    Object.keys(source).forEach(key => {
+      const sourceValue = (source as Record<string, unknown>)[key]
+      const targetValue = (target as Record<string, unknown>)[key]
+      if (isPlainObject(sourceValue) && isPlainObject(targetValue)) {
+        output[key] = mergeDeepRight(
+          targetValue as Record<string, unknown>,
+          sourceValue as Record<string, unknown>
+        )
+      } else {
+        output[key] = sourceValue
+      }
+    })
+  }
+
+  return output as T
+}
+
+export const generateUUID = (): UUIDv4 => {
+  return randomUUID()
+}
+
+export const validateUUID = (uuid: unknown): uuid is UUIDv4 => {
+  if (typeof uuid !== 'string') {
+    return false
+  }
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(
+    uuid
+  )
+}
+
+export const validateIdentifierString = (value: string, maxLength: number): boolean => {
+  return isNotEmptyString(value) && value.length <= maxLength
+}
+
+export const sleep = async (milliSeconds: number): Promise<NodeJS.Timeout> => {
+  return await new Promise<NodeJS.Timeout>(resolve => {
+    const timeout = setTimeout(() => {
+      resolve(timeout)
+    }, milliSeconds)
+  })
+}
+
+/**
+ * Races a promise against a timeout. Resolves/rejects with the promise result
+ * if it settles before the deadline, otherwise rejects with a timeout error.
+ * The timer is always cleaned up when the promise settles first.
+ * @param promise - The promise to race
+ * @param timeoutMs - Timeout duration in milliseconds
+ * @param timeoutError - Error (or message string) to reject with on timeout
+ * @returns The resolved value of the original promise, or rejects on timeout
+ */
+export const promiseWithTimeout = <T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutError: Error | string
+): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout>
+  return Promise.race([
+    promise.finally(() => {
+      clearTimeout(timer)
+    }),
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(typeof timeoutError === 'string' ? new Error(timeoutError) : timeoutError)
+      }, timeoutMs)
+    }),
+  ])
+}
+
+export const formatDurationMilliSeconds = (duration: number): string => {
+  duration = convertToInt(duration)
+  if (duration < 0) {
+    throw new RangeError('Duration cannot be negative')
+  }
+  const days = Math.floor(duration / (24 * 3600 * 1000))
+  const hours = Math.floor(millisecondsToHours(duration) - days * 24)
+  const minutes = Math.floor(
+    millisecondsToMinutes(duration) - days * 24 * 60 - hoursToMinutes(hours)
+  )
+  const seconds = Math.floor(
+    millisecondsToSeconds(duration) -
+      days * 24 * 3600 -
+      hoursToSeconds(hours) -
+      minutesToSeconds(minutes)
+  )
+  if (days === 0 && hours === 0 && minutes === 0 && seconds === 0) {
+    return formatDuration({ seconds }, { zero: true })
+  }
+  return formatDuration({
+    days,
+    hours,
+    minutes,
+    seconds,
+  })
+}
+
+export const formatDurationSeconds = (duration: number): string => {
+  return formatDurationMilliSeconds(secondsToMilliseconds(duration))
+}
+
+// More efficient time validation function than the one provided by date-fns
+export const isValidDate = (date: Date | number | undefined): date is Date | number => {
+  if (typeof date === 'number') {
+    return Number.isFinite(date)
+  } else if (isDate(date)) {
+    return !Number.isNaN(date.getTime())
+  }
+  return false
+}
+
+export const convertToDate = (
+  value: Date | null | number | string | undefined
+): Date | undefined => {
+  if (value == null) {
+    return undefined
+  }
+  if (isDate(value)) {
+    return value
+  }
+  if (typeof value === 'string' || typeof value === 'number') {
+    const valueToDate = new Date(value)
+    if (Number.isNaN(valueToDate.getTime())) {
+      throw new Error(`Cannot convert to date: '${value.toString()}'`)
+    }
+    return valueToDate
+  }
+  return undefined
+}
+
+export const convertToInt = (value: unknown): number => {
+  if (value == null) {
+    return 0
+  }
+  if (Number.isSafeInteger(value)) {
+    return value as number
+  }
+  if (typeof value === 'number') {
+    return Math.trunc(value)
+  }
+  let changedValue: number = value as number
+  if (typeof value === 'string') {
+    changedValue = Number.parseInt(value)
+  }
+  if (Number.isNaN(changedValue)) {
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string
+    throw new Error(`Cannot convert to integer: '${value.toString()}'`)
+  }
+  return changedValue
+}
+
+export const convertToIntOrNaN = (value: unknown): number => {
+  try {
+    return convertToInt(value)
+  } catch {
+    return Number.NaN
+  }
+}
+
+export const convertToFloat = (value: unknown): number => {
+  if (value == null) {
+    return 0
+  }
+  let changedValue: number = value as number
+  if (typeof value === 'string') {
+    changedValue = Number.parseFloat(value)
+  }
+  if (Number.isNaN(changedValue)) {
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string
+    throw new Error(`Cannot convert to float: '${value.toString()}'`)
+  }
+  return changedValue
+}
+
+export const convertToBoolean = (value: unknown): boolean => {
+  let result = false
+  if (value != null) {
+    // Check the type
+    if (typeof value === 'boolean') {
+      return value
+    } else if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase()
+      result = normalized === 'true' || normalized === '1'
+    } else if (typeof value === 'number' && value === 1) {
+      result = true
+    }
+  }
+  return result
+}
+
+/**
+ * Generates a cryptographically secure random float in the [min, max] range
+ * @param max - The maximum value (inclusive). Defaults to `Number.MAX_VALUE`
+ * @param min - The minimum value (inclusive). Defaults to `0`
+ * @returns A float in the [min, max] range
+ */
+export const getRandomFloat = (max = Number.MAX_VALUE, min = 0): number => {
+  if (max < min) {
+    throw new RangeError('Invalid interval')
+  }
+  if (!Number.isFinite(max) || !Number.isFinite(min)) {
+    throw new RangeError('Invalid interval')
+  }
+  return (randomBytes(4).readUInt32LE() / 0xffffffff) * (max - min) + min
+}
+
+/**
+ * Rounds the given number to the given scale.
+ * The rounding is done using the "round half away from zero" method.
+ * @param numberValue - The number to round.
+ * @param scale - The scale to round to.
+ * @returns The rounded number.
+ */
+export const roundTo = (numberValue: number, scale: number): number => {
+  const factor = 10 ** scale
+  const scaled = numberValue * factor
+
+  const sign = Math.sign(scaled) || 1
+  const absScaled = Math.abs(scaled)
+  const integerPart = Math.trunc(absScaled)
+  const fractionalPart = absScaled - integerPart
+
+  const tol = Number.EPSILON * absScaled
+
+  const increment = fractionalPart > 0.5 + tol ? 1 : fractionalPart < 0.5 - tol ? 0 : 1
+
+  const roundedScaled = sign * (integerPart + increment)
+  return roundedScaled / factor
+}
+
+export const getRandomFloatRounded = (max = Number.MAX_VALUE, min = 0, scale = 2): number => {
+  return roundTo(getRandomFloat(max, min), scale)
+}
+
+export const getRandomFloatFluctuatedRounded = (
+  staticValue: number,
+  fluctuationPercent: number,
+  scale = 2
+): number => {
+  if (fluctuationPercent < 0 || fluctuationPercent > 100) {
+    throw new RangeError(
+      `Fluctuation percent must be between 0 and 100. Actual value: ${fluctuationPercent.toString()}`
+    )
+  }
+  if (fluctuationPercent === 0) {
+    return roundTo(staticValue, scale)
+  }
+  const fluctuationRatio = fluctuationPercent / 100
+  const upperValue = staticValue * (1 + fluctuationRatio)
+  const lowerValue = staticValue * (1 - fluctuationRatio)
+  const max = Math.max(upperValue, lowerValue)
+  const min = Math.min(upperValue, lowerValue)
+  return getRandomFloatRounded(max, min, scale)
+}
+
+export const extractTimeSeriesValues = (timeSeries: CircularBuffer<TimestampedData>): number[] => {
+  return (timeSeries.toArray() as TimestampedData[]).map(timeSeriesItem => timeSeriesItem.value)
+}
+
+export const clone = <T>(object: T): T => {
+  return structuredClone(object)
+}
+
+type AsyncFunctionType<A extends unknown[], R> = (...args: A) => PromiseLike<R>
+
+// eslint-disable-next-line @typescript-eslint/no-empty-function
+const AsyncFunctionConstructor = (async () => {}).constructor
+
+/**
+ * Detects whether the given value is an asynchronous function or not.
+ * @param fn - Unknown value.
+ * @returns `true` if `fn` was an asynchronous function, otherwise `false`.
+ * @internal
+ */
+export const isAsyncFunction = (fn: unknown): fn is AsyncFunctionType<unknown[], unknown> => {
+  return fn?.constructor === AsyncFunctionConstructor
+}
+
+export const isCFEnvironment = (): boolean => {
+  return env.VCAP_APPLICATION != null
+}
+
+declare const nonEmptyString: unique symbol
+type NonEmptyString = string & { [nonEmptyString]: true }
+export const isNotEmptyString = (value: unknown): value is NonEmptyString => {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+export const isNotEmptyArray = <T>(
+  value: unknown
+): value is NonEmptyArray<T> | ReadonlyNonEmptyArray<T> => {
+  return Array.isArray(value) && value.length > 0
+}
+
+export const insertAt = (str: string, subStr: string, pos: number): string =>
+  `${str.slice(0, pos)}${subStr}${str.slice(pos)}`
+
+/**
+ * Generalized exponential back-off: baseDelayMs × 2^min(retryNumber, maxRetries) + jitter.
+ * @param options - back-off configuration
+ * @param options.baseDelayMs - base delay in milliseconds
+ * @param options.retryNumber - current retry attempt (0-based)
+ * @param options.maxRetries - stop doubling after this many retries (default: unlimited)
+ * @param options.jitterMs - maximum fixed random jitter in milliseconds (default: 0)
+ * @param options.jitterPercent - proportional jitter as fraction of computed delay, e.g. 0.2 = 20% (default: 0)
+ * @returns delay in milliseconds
+ */
+export const computeExponentialBackOffDelay = (options: {
+  baseDelayMs: number
+  jitterMs?: number
+  jitterPercent?: number
+  maxRetries?: number
+  retryNumber: number
+}): number => {
+  const { baseDelayMs, jitterMs, jitterPercent, maxRetries, retryNumber } = options
+  const effectiveRetry = maxRetries != null ? Math.min(retryNumber, maxRetries) : retryNumber
+  const delay = baseDelayMs * 2 ** effectiveRetry
+  let jitter = 0
+  if (jitterPercent != null && jitterPercent > 0) {
+    jitter = delay * jitterPercent * secureRandom()
+  } else if (jitterMs != null && jitterMs > 0) {
+    jitter = secureRandom() * jitterMs
+  }
+  return delay + jitter
+}
+
+/**
+ * Clamps a timer delay value to the safe range for Node.js setInterval/setTimeout.
+ * @param delayMs - The delay value in milliseconds.
+ * @returns The clamped delay value, guaranteed to be within [0, 2^31-1] ms.
+ * @see https://nodejs.org/api/timers.html#settimeoutcallback-delay-args
+ */
+export const clampToSafeTimerValue = (delayMs: number): number => {
+  return Math.min(Math.max(0, delayMs), Constants.MAX_SETINTERVAL_DELAY_MS)
+}
+
+/**
+ * Generates a cryptographically secure random number in the [0,1[ range
+ * @returns A number in the [0,1[ range
+ */
+export const secureRandom = (): number => {
+  return getRandomValues(new Uint32Array(1))[0] / 0x100000000
+}
+
+export const JSONStringify = <
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
+  T extends
+    | JsonType
+    | Map<string, Record<string, unknown>>
+    | Record<string, unknown>[]
+    | Set<Record<string, unknown>>
+>(
+    object: T,
+    space?: number | string,
+    mapFormat?: MapStringifyFormat
+  ): string => {
+  return JSON.stringify(
+    object,
+    (_, value: Record<string, unknown>) => {
+      if (value instanceof Map) {
+        switch (mapFormat) {
+          case MapStringifyFormat.object:
+            return Object.fromEntries<Record<string, unknown>>(value)
+          case MapStringifyFormat.array:
+          default:
+            return [...value]
+        }
+      } else if (value instanceof Set) {
+        return [...value] as Record<string, unknown>[]
+      }
+      return value
+    },
+    space
+  )
+}
+
+/**
+ * Converts websocket error code to human readable string message
+ * @param code - websocket error code
+ * @returns human readable string message
+ */
+export const getWebSocketCloseEventStatusString = (code: number): string => {
+  if (code >= 0 && code <= 999) {
+    return '(Unused)'
+  } else if (code >= 1016) {
+    if (code <= 1999) {
+      return '(For WebSocket standard)'
+    } else if (code <= 2999) {
+      return '(For WebSocket extensions)'
+    } else if (code <= 3999) {
+      return '(For libraries and frameworks)'
+    } else if (code <= 4999) {
+      return '(For applications)'
+    }
+  }
+  const statusString = (
+    WebSocketCloseEventStatusString as Readonly<Record<number, string | undefined>>
+  )[code]
+  if (statusString != null) {
+    return statusString
+  }
+  return '(Unknown)'
+}
+
+export const isArraySorted = <T>(array: T[], compareFn: (a: T, b: T) => number): boolean => {
+  if (array.length <= 1) {
+    return true
+  }
+  for (let index = 0; index < array.length - 1; ++index) {
+    if (compareFn(array[index], array[index + 1]) > 0) {
+      return false
+    }
+  }
+  return true
+}
+
+export const queueMicrotaskErrorThrowing = (error: Error): void => {
+  queueMicrotask(() => {
+    throw error
+  })
+}
+
+export const truncateId = (identifier: string, maxLen = 8): string => {
+  if (identifier.length <= maxLen) {
+    return identifier
+  }
+  return `${identifier.slice(0, maxLen)}...`
+}
+
+export const getMessageTypeString = (messageType: MessageType | undefined): string => {
+  switch (messageType) {
+    case MessageType.CALL_ERROR_MESSAGE:
+      return 'error'
+    case MessageType.CALL_MESSAGE:
+      return 'request'
+    case MessageType.CALL_RESULT_MESSAGE:
+      return 'response'
+    default:
+      return 'unknown'
+  }
+}

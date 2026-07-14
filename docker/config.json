@@ -1,0 +1,46 @@
+{
+  "supervisionUrls": ["ws://ocpp-mock-server:9000"],
+  "supervisionUrlDistribution": "round-robin",
+  "log": {
+    "file": "/dev/stdout",
+    "errorFile": "/dev/stderr",
+    "console": false,
+    "rotate": false
+  },
+  "worker": {
+    "processType": "workerSet",
+    "elementsPerWorker": 1,
+    "poolMinSize": 4,
+    "poolMaxSize": 16
+  },
+  "uiServer": {
+    "enabled": true,
+    "options": {
+      "host": "::"
+    },
+    "accessPolicy": {
+      "allowedHosts": ["localhost", "127.0.0.1", "::1"],
+      "allowedOrigins": [],
+      "allowLoopbackProxy": false,
+      "requireTlsForNonLoopback": false,
+      "trustedProxies": []
+    },
+    "type": "ws",
+    "authentication": {
+      "enabled": true,
+      "type": "protocol-basic-auth",
+      "username": "admin",
+      "password": "admin"
+    }
+  },
+  "stationTemplateUrls": [
+    {
+      "file": "keba-ocpp2.station-template.json",
+      "numberOfStations": 10
+    },
+    {
+      "file": "keba.station-template.json",
+      "numberOfStations": 2
+    }
+  ]
+}

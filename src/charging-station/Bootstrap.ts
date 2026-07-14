@@ -1,0 +1,814 @@
+// Partial Copyright Jerome Benoit. 2021-2025. All Rights Reserved.
+
+import type { Worker } from 'node:worker_threads'
+
+import { EventEmitter } from 'node:events'
+import { dirname, extname, join } from 'node:path'
+import process, { env, exit } from 'node:process'
+import { fileURLToPath } from 'node:url'
+import { isMainThread } from 'node:worker_threads'
+import { availableParallelism, type MessageHandler } from 'poolifier'
+
+import type { IBootstrap } from './IBootstrap.js'
+import type { AbstractUIServer } from './ui-server/AbstractUIServer.js'
+
+import packageJson from '../../package.json' with { type: 'json' }
+import { BaseError } from '../exception/index.js'
+import { type Storage, StorageFactory } from '../performance/index.js'
+import {
+  type ChargingStationData,
+  type ChargingStationInfo,
+  type ChargingStationOptions,
+  type ChargingStationWorkerData,
+  type ChargingStationWorkerMessage,
+  type ChargingStationWorkerMessageData,
+  ChargingStationWorkerMessageEvents,
+  ConfigurationSection,
+  ProcedureName,
+  type SimulatorState,
+  type Statistics,
+  type StorageConfiguration,
+  type TemplateStatistics,
+  type UIServerConfiguration,
+  type WorkerConfiguration,
+} from '../types/index.js'
+import {
+  Configuration,
+  Constants,
+  formatDurationMilliSeconds,
+  generateUUID,
+  handleUncaughtException,
+  handleUnhandledRejection,
+  isAsyncFunction,
+  isNotEmptyArray,
+  logger,
+  logPrefix,
+  once,
+} from '../utils/index.js'
+import {
+  DEFAULT_ELEMENTS_PER_WORKER,
+  DEFAULT_POOL_MAX_SIZE,
+  DEFAULT_POOL_MIN_SIZE,
+  type WorkerAbstract,
+  WorkerFactory,
+} from '../worker/index.js'
+import { readStateFile, reconstructTemplateIndexes, writeStateFile } from './BootstrapStateUtils.js'
+import { buildTemplateName, waitChargingStationEvents } from './Helpers.js'
+import { UIServerFactory } from './ui-server/UIServerFactory.js'
+
+const moduleName = 'Bootstrap'
+
+enum exitCodes {
+  succeeded = 0,
+  missingChargingStationsConfiguration = 1,
+  duplicateChargingStationTemplateUrls = 2,
+  noChargingStationTemplates = 3,
+  gracefulShutdownError = 4,
+}
+
+/**
+ * Reason for a `Bootstrap.stop` invocation. Drives state-file persistence:
+ * `user` persists `started:false` to disk; `shutdown` and `reload` do not.
+ *
+ * Coalescing semantics: when multiple callers invoke `stop` concurrently they
+ * all observe the same in-flight transition. The FIRST caller's `reason`
+ * controls persistence; later callers' `reason` values are ignored. A `user`
+ * stop coalescing onto an in-flight `shutdown` or `reload` therefore does not
+ * persist `started:false`.
+ */
+enum StopReason {
+  reload = 'reload',
+  shutdown = 'shutdown',
+  user = 'user',
+}
+
+export class Bootstrap extends EventEmitter implements IBootstrap {
+  private static instance: Bootstrap | null = null
+  public get numberOfChargingStationTemplates (): number {
+    return this.templateStatistics.size
+  }
+
+  public get numberOfConfiguredChargingStations (): number {
+    return [...this.templateStatistics.values()].reduce(
+      (accumulator, value) => accumulator + value.configured,
+      0
+    )
+  }
+
+  public get numberOfProvisionedChargingStations (): number {
+    return [...this.templateStatistics.values()].reduce(
+      (accumulator, value) => accumulator + value.provisioned,
+      0
+    )
+  }
+
+  private readonly assetsDir: string
+  private readonly configurationsDir: string
+  private shuttingDown: boolean
+  private started: boolean
+  private starting: boolean
+  private startPromise?: Promise<void>
+  private readonly stateFilePath: string
+  private stopPromise?: Promise<void>
+  private storage?: Storage
+  private readonly templateStatistics: Map<string, TemplateStatistics>
+  private readonly uiServer: AbstractUIServer
+  private uiServerStarted: boolean
+  private readonly version: string = packageJson.version
+  private readonly warnPersistStateWithoutUIServerOnce: () => void
+  private workerImplementation?: WorkerAbstract<ChargingStationWorkerData, ChargingStationInfo>
+
+  private get numberOfAddedChargingStations (): number {
+    return [...this.templateStatistics.values()].reduce(
+      (accumulator, value) => accumulator + value.added,
+      0
+    )
+  }
+
+  private get numberOfStartedChargingStations (): number {
+    return [...this.templateStatistics.values()].reduce(
+      (accumulator, value) => accumulator + value.started,
+      0
+    )
+  }
+
+  private get persistStateEnabled (): boolean {
+    if (env[Constants.ENV_SIMULATOR_COLD_START] === 'true') {
+      return false
+    }
+    if (!Configuration.getPersistState()) {
+      return false
+    }
+    if (
+      Configuration.getConfigurationSection<UIServerConfiguration>(ConfigurationSection.uiServer)
+        .enabled !== true
+    ) {
+      this.warnPersistStateWithoutUIServerOnce()
+      return false
+    }
+    return true
+  }
+
+  private constructor () {
+    super()
+    for (const signal of ['SIGINT', 'SIGQUIT', 'SIGTERM']) {
+      process.on(signal, this.gracefulShutdown.bind(this))
+    }
+    // Enable unconditionally for now
+    handleUnhandledRejection()
+    handleUncaughtException()
+    this.started = false
+    this.starting = false
+    this.shuttingDown = false
+    this.uiServerStarted = false
+    this.templateStatistics = new Map<string, TemplateStatistics>()
+    this.assetsDir = join(dirname(fileURLToPath(import.meta.url)), 'assets')
+    this.configurationsDir = join(this.assetsDir, 'configurations')
+    this.stateFilePath = join(this.configurationsDir, '.simulator-state.json')
+    this.warnPersistStateWithoutUIServerOnce = once(() => {
+      logger.warn(
+        `${this.logPrefix()} ${moduleName}: persistState is enabled but UI server is disabled. Persistence has no recovery channel and is ignored`
+      )
+    })
+    this.uiServer = UIServerFactory.getUIServerImplementation(
+      Configuration.getConfigurationSection<UIServerConfiguration>(ConfigurationSection.uiServer),
+      this
+    )
+    this.prepareTemplateStatistics()
+    this.initializeWorkerImplementation(
+      Configuration.getConfigurationSection<WorkerConfiguration>(ConfigurationSection.worker)
+    )
+    Configuration.configurationChangeCallback = async () => {
+      if (isMainThread) {
+        await Bootstrap.getInstance().restart()
+      }
+    }
+  }
+
+  public static getInstance (): Bootstrap {
+    Bootstrap.instance ??= new Bootstrap()
+    return Bootstrap.instance
+  }
+
+  public async addChargingStation (
+    index: number,
+    templateFile: string,
+    options?: ChargingStationOptions
+  ): Promise<ChargingStationInfo | undefined> {
+    if (!this.started && !this.starting) {
+      throw new BaseError(
+        'Cannot add charging station while the charging stations simulator is not started'
+      )
+    }
+    const stationInfo = await this.workerImplementation?.addElement({
+      index,
+      options,
+      templateFile: join(this.assetsDir, 'station-templates', templateFile),
+    })
+    const templateStatistics = this.templateStatistics.get(buildTemplateName(templateFile))
+    if (stationInfo != null && templateStatistics != null) {
+      ++templateStatistics.added
+      templateStatistics.indexes.add(index)
+    }
+    return stationInfo
+  }
+
+  public getLastContiguousIndex (templateName: string): number {
+    const templateStatistics = this.templateStatistics.get(templateName)
+    if (templateStatistics == null) {
+      return 0
+    }
+    const indexes = [...templateStatistics.indexes].concat(0).sort((a, b) => a - b)
+    for (let i = 0; i < indexes.length - 1; i++) {
+      if (indexes[i + 1] - indexes[i] !== 1) {
+        return indexes[i]
+      }
+    }
+    return indexes[indexes.length - 1]
+  }
+
+  public getPerformanceStatistics (): IterableIterator<Statistics> | undefined {
+    return this.storage?.getPerformanceStatistics()
+  }
+
+  public getState (): SimulatorState {
+    return {
+      configuration: Configuration.getConfigurationData(),
+      started: this.started,
+      templateStatistics: this.templateStatistics,
+      version: this.version,
+    }
+  }
+
+  public shouldAutoStart (): boolean {
+    if (!this.persistStateEnabled) {
+      return true
+    }
+    const stateFile = readStateFile(this.stateFilePath, this.logPrefix)
+    if (stateFile == null) {
+      return true
+    }
+    return stateFile.started
+  }
+
+  public async start (): Promise<void> {
+    if (this.started) {
+      logger.warn(
+        `${this.logPrefix()} ${moduleName}.start: Cannot start an already started charging stations simulator`
+      )
+      return
+    }
+    if (this.startPromise != null) {
+      logger.debug(
+        `${this.logPrefix()} ${moduleName}.start: Awaiting an already in-flight start of the charging stations simulator`
+      )
+      return this.startPromise
+    }
+    this.startPromise = this.doStart().finally(() => {
+      this.startPromise = undefined
+    })
+    return this.startPromise
+  }
+
+  public startUIServer (): void {
+    if (this.uiServerStarted) {
+      return
+    }
+    if (
+      Configuration.getConfigurationSection<UIServerConfiguration>(ConfigurationSection.uiServer)
+        .enabled !== true
+    ) {
+      return
+    }
+    this.syncUIServerTemplates()
+    this.uiServer.start()
+    this.uiServerStarted = true
+  }
+
+  /**
+   * Stops the simulator. Idempotent and concurrency-safe.
+   *
+   * If a stop is already in flight, returns the same `Promise<void>` to all
+   * callers. The FIRST caller's `reason` controls the in-flight transition's
+   * persistence semantics; later callers' `reason` values are ignored. See
+   * the {@link StopReason} doc-comment for the coalescing contract.
+   *
+   * If the simulator is already stopped and `reason === StopReason.user`,
+   * reconciles a stale `started:true` state file by writing `started:false`.
+   * For `reason !== StopReason.user` the no-op branch returns silently
+   * without touching the state file; a stale `started:true` is then
+   * reconciled only by the next `stop(user)` or successful `start()`.
+   * @param reason - Stop reason; defaults to {@link StopReason.user}.
+   * @returns A `Promise<void>` that resolves when the stop transition finishes.
+   */
+  public async stop (reason: StopReason = StopReason.user): Promise<void> {
+    if (!this.started) {
+      logger.warn(
+        `${this.logPrefix()} ${moduleName}.stop: Cannot stop an already stopped charging stations simulator`
+      )
+      if (this.persistStateEnabled && reason === StopReason.user) {
+        const stateFile = readStateFile(this.stateFilePath, this.logPrefix)
+        if (stateFile?.started === true) {
+          await writeStateFile(this.stateFilePath, false, this.logPrefix)
+        }
+      }
+      return
+    }
+    if (this.stopPromise != null) {
+      logger.debug(
+        `${this.logPrefix()} ${moduleName}.stop: Awaiting an already in-flight stop of the charging stations simulator`
+      )
+      return this.stopPromise
+    }
+    this.stopPromise = this.doStop(reason).finally(() => {
+      this.stopPromise = undefined
+    })
+    return this.stopPromise
+  }
+
+  private async doStart (): Promise<void> {
+    this.starting = true
+    try {
+      this.on(ChargingStationWorkerMessageEvents.added, this.workerEventAdded)
+      this.on(ChargingStationWorkerMessageEvents.deleted, this.workerEventDeleted)
+      this.on(ChargingStationWorkerMessageEvents.started, this.workerEventStarted)
+      this.on(ChargingStationWorkerMessageEvents.stopped, this.workerEventStopped)
+      this.on(ChargingStationWorkerMessageEvents.updated, this.workerEventUpdated)
+      this.on(
+        ChargingStationWorkerMessageEvents.performanceStatistics,
+        this.workerEventPerformanceStatistics
+      )
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      if (isAsyncFunction(this.workerImplementation?.start)) {
+        await this.workerImplementation.start()
+      } else {
+        ;(this.workerImplementation?.start as () => void)()
+      }
+      const performanceStorageConfiguration =
+        Configuration.getConfigurationSection<StorageConfiguration>(
+          ConfigurationSection.performanceStorage
+        )
+      if (performanceStorageConfiguration.enabled === true) {
+        const storageType = performanceStorageConfiguration.type
+        const storageUri = performanceStorageConfiguration.uri
+        if (storageType != null && storageUri != null) {
+          this.storage = StorageFactory.getStorage(storageType, storageUri, this.logPrefix())
+          await this.storage.open()
+        }
+      }
+      this.startUIServer()
+      // Start ChargingStation object instance in worker thread
+      for (const stationTemplateUrl of Configuration.getStationTemplateUrls() ?? []) {
+        const nbStations = stationTemplateUrl.numberOfStations
+        const sequentialAdd =
+          (Configuration.getConfigurationSection<WorkerConfiguration>(ConfigurationSection.worker)
+            .elementAddDelay ?? 0) > 0
+        if (sequentialAdd) {
+          for (let index = 1; index <= nbStations; index++) {
+            try {
+              await this.addChargingStation(index, stationTemplateUrl.file)
+            } catch (error) {
+              logger.error(
+                `${this.logPrefix()} ${moduleName}.start: Error at starting charging station with template file ${stationTemplateUrl.file}:`,
+                error
+              )
+            }
+          }
+        } else {
+          const results = await Promise.allSettled(
+            Array.from({ length: nbStations }, (_, i) =>
+              this.addChargingStation(i + 1, stationTemplateUrl.file)
+            )
+          )
+          for (const result of results) {
+            if (result.status === 'rejected') {
+              logger.error(
+                `${this.logPrefix()} ${moduleName}.start: Error at starting charging station with template file ${stationTemplateUrl.file}:`,
+                result.reason
+              )
+            }
+          }
+        }
+      }
+      const workerConfiguration = Configuration.getConfigurationSection<WorkerConfiguration>(
+        ConfigurationSection.worker
+      )
+      logger.info(
+        `${this.logPrefix()} ${moduleName}.start: Charging stations simulator ${this.version} started with ${this.numberOfConfiguredChargingStations.toString()} configured and ${this.numberOfProvisionedChargingStations.toString()} provisioned charging station(s) from ${this.numberOfChargingStationTemplates.toString()} charging station template(s) and ${
+          Configuration.workerDynamicPoolInUse()
+            ? // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+              `${workerConfiguration.poolMinSize?.toString()}/`
+            : ''
+          // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+        }${this.workerImplementation?.size.toString()}${
+          Configuration.workerPoolInUse()
+            ? // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+              `/${workerConfiguration.poolMaxSize?.toString()}`
+            : ''
+          // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+        } worker(s) concurrently running in '${workerConfiguration.processType}' mode${
+          this.workerImplementation?.maxElementsPerWorker != null
+            ? ` (${this.workerImplementation.maxElementsPerWorker.toString()} charging station(s) per worker)`
+            : ''
+        }`
+      )
+      Configuration.workerDynamicPoolInUse() &&
+        logger.warn(
+          `${this.logPrefix()} ${moduleName}.start: Charging stations simulator is using dynamic pool mode. This is an experimental feature with known issues.\nPlease consider using fixed pool or worker set mode instead`
+        )
+      logger.info(
+        `${this.logPrefix()} ${moduleName}.start: Worker set/pool information:`,
+        this.workerImplementation?.info
+      )
+      this.started = true
+      if (this.persistStateEnabled) {
+        await writeStateFile(this.stateFilePath, true, this.logPrefix)
+      }
+    } finally {
+      this.starting = false
+    }
+  }
+
+  private async doStop (reason: StopReason): Promise<void> {
+    await this.uiServer.sendInternalRequest(
+      this.uiServer.buildProtocolRequest(
+        generateUUID(),
+        ProcedureName.STOP_CHARGING_STATION,
+        Constants.EMPTY_FROZEN_OBJECT
+      )
+    )
+    await this.waitChargingStationsStopped()
+    await this.workerImplementation?.stop()
+    this.removeAllListeners()
+    this.uiServer.clearCaches()
+    await this.storage?.close()
+    delete this.storage
+    this.started = false
+    if (this.persistStateEnabled && reason === StopReason.user) {
+      await writeStateFile(this.stateFilePath, false, this.logPrefix)
+    }
+  }
+
+  private gracefulShutdown (): void {
+    if (this.shuttingDown) {
+      return
+    }
+    this.shuttingDown = true
+    this.stop(StopReason.shutdown)
+      .then(() => {
+        logger.info(`${this.logPrefix()} ${moduleName}.gracefulShutdown: Graceful shutdown`)
+        this.stopUIServer()
+        return exit(exitCodes.succeeded)
+      })
+      .catch((error: unknown) => {
+        logger.error(
+          `${this.logPrefix()} ${moduleName}.gracefulShutdown: Error while shutting down charging stations simulator:`,
+          error
+        )
+        exit(exitCodes.gracefulShutdownError)
+      })
+  }
+
+  private initializeCounters (): void {
+    const stationTemplateUrls = Configuration.getStationTemplateUrls() ?? []
+    if (isNotEmptyArray(stationTemplateUrls)) {
+      for (const stationTemplateUrl of stationTemplateUrls) {
+        const templateName = buildTemplateName(stationTemplateUrl.file)
+        this.templateStatistics.set(templateName, {
+          added: 0,
+          configured: stationTemplateUrl.numberOfStations,
+          indexes: new Set<number>(),
+          provisioned: stationTemplateUrl.provisionedNumberOfStations ?? 0,
+          started: 0,
+        })
+      }
+      if (this.templateStatistics.size !== stationTemplateUrls.length) {
+        logger.error(
+          `${this.logPrefix()} ${moduleName}.initializeCounters: 'stationTemplateUrls' contains duplicate entries, please check your configuration`
+        )
+        exit(exitCodes.duplicateChargingStationTemplateUrls)
+      }
+    } else {
+      logger.error(
+        `${this.logPrefix()} ${moduleName}.initializeCounters: 'stationTemplateUrls' not defined or empty, please check your configuration`
+      )
+      exit(exitCodes.missingChargingStationsConfiguration)
+    }
+    if (
+      this.numberOfConfiguredChargingStations === 0 &&
+      Configuration.getConfigurationSection<UIServerConfiguration>(ConfigurationSection.uiServer)
+        .enabled !== true
+    ) {
+      logger.error(
+        `${this.logPrefix()} ${moduleName}.initializeCounters: 'stationTemplateUrls' has no charging station enabled and UI server is disabled, please check your configuration`
+      )
+      exit(exitCodes.noChargingStationTemplates)
+    }
+  }
+
+  private initializeWorkerImplementation (workerConfiguration: WorkerConfiguration): void {
+    if (!isMainThread) {
+      return
+    }
+    let elementsPerWorker: number
+    switch (workerConfiguration.elementsPerWorker) {
+      case 'all':
+        elementsPerWorker =
+          this.numberOfConfiguredChargingStations + this.numberOfProvisionedChargingStations
+        break
+      case 'auto':
+        elementsPerWorker =
+          this.numberOfConfiguredChargingStations + this.numberOfProvisionedChargingStations >
+          availableParallelism()
+            ? Math.round(
+              (this.numberOfConfiguredChargingStations +
+                  this.numberOfProvisionedChargingStations) /
+                  (availableParallelism() * 1.5)
+            )
+            : 1
+        break
+      default:
+        elementsPerWorker = workerConfiguration.elementsPerWorker ?? DEFAULT_ELEMENTS_PER_WORKER
+    }
+    if (workerConfiguration.processType == null) {
+      throw new BaseError('Worker process type is not defined in configuration')
+    }
+    this.workerImplementation = WorkerFactory.getWorkerImplementation<
+      ChargingStationWorkerData,
+      ChargingStationInfo
+    >(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        `ChargingStationWorker${extname(fileURLToPath(import.meta.url))}`
+      ),
+      workerConfiguration.processType,
+      {
+        elementAddDelay: workerConfiguration.elementAddDelay,
+        elementsPerWorker,
+        poolMaxSize: workerConfiguration.poolMaxSize ?? DEFAULT_POOL_MAX_SIZE,
+        poolMinSize: workerConfiguration.poolMinSize ?? DEFAULT_POOL_MIN_SIZE,
+        poolOptions: {
+          messageHandler: this.messageHandler.bind(this) as MessageHandler<Worker>,
+          ...(workerConfiguration.resourceLimits != null && {
+            workerOptions: {
+              resourceLimits: workerConfiguration.resourceLimits,
+            },
+          }),
+        },
+        workerStartDelay: workerConfiguration.startDelay,
+      }
+    )
+  }
+
+  private readonly logPrefix = (): string => {
+    return logPrefix(' Bootstrap |')
+  }
+
+  private messageHandler (
+    msg: ChargingStationWorkerMessage<ChargingStationWorkerMessageData>
+  ): void {
+    // logger.debug(
+    //   `${this.logPrefix()} ${moduleName}.messageHandler: Charging station worker message received: ${JSON.stringify(
+    //     msg,
+    //     undefined,
+    //     2
+    //   )}`
+    // )
+    // Skip worker message events processing
+    if (msg.uuid != null) {
+      return
+    }
+    const { data, event } = msg
+    try {
+      switch (event) {
+        case ChargingStationWorkerMessageEvents.accepted:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.accepted) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.accepted, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.added:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.added) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.added, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.connected:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.connected) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.connected, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.connectorStatusChanged:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.connectorStatusChanged) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.connectorStatusChanged, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.deleted:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.deleted) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.deleted, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.disconnected:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.disconnected) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.disconnected, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.pending:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.pending) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.pending, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.performanceStatistics:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.performanceStatistics) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.performanceStatistics, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.rejected:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.rejected) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.rejected, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.started:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.started) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.started, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.stopped:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.stopped) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.stopped, data)
+          }
+          break
+        case ChargingStationWorkerMessageEvents.updated:
+          if (this.listenerCount(ChargingStationWorkerMessageEvents.updated) > 0) {
+            this.emit(ChargingStationWorkerMessageEvents.updated, data)
+          }
+          break
+        default:
+          throw new BaseError(
+            `Unknown charging station worker message event: '${event as string}' received with data: ${JSON.stringify(
+              data,
+              undefined,
+              2
+            )}`
+          )
+      }
+    } catch (error) {
+      logger.error(
+        `${this.logPrefix()} ${moduleName}.messageHandler: Error occurred while handling charging station worker message event '${event}':`,
+        error
+      )
+    }
+  }
+
+  private prepareTemplateStatistics (): void {
+    this.initializeCounters()
+    reconstructTemplateIndexes(this.configurationsDir, this.templateStatistics, this.logPrefix)
+  }
+
+  private async restart (): Promise<void> {
+    await this.stop(StopReason.reload)
+    if (
+      Configuration.getConfigurationSection<UIServerConfiguration>(ConfigurationSection.uiServer)
+        .enabled !== true
+    ) {
+      this.stopUIServer()
+    }
+    this.prepareTemplateStatistics()
+    if (this.uiServerStarted) {
+      this.syncUIServerTemplates()
+    }
+    // TODO: compare worker configuration hash to skip unnecessary re-initialization
+    this.initializeWorkerImplementation(
+      Configuration.getConfigurationSection<WorkerConfiguration>(ConfigurationSection.worker)
+    )
+    await this.start()
+  }
+
+  private stopUIServer (): void {
+    if (!this.uiServerStarted) {
+      return
+    }
+    this.uiServer.stop()
+    this.uiServerStarted = false
+  }
+
+  private syncUIServerTemplates (): void {
+    this.uiServer.setChargingStationTemplates(
+      Configuration.getStationTemplateUrls()?.map(stationTemplateUrl =>
+        buildTemplateName(stationTemplateUrl.file)
+      )
+    )
+  }
+
+  private async waitChargingStationsStopped (): Promise<string> {
+    return await new Promise<string>((resolve, reject: (reason?: unknown) => void) => {
+      const waitTimeout = setTimeout(() => {
+        const timeoutMessage = `Timeout ${formatDurationMilliSeconds(
+          Constants.STOP_CHARGING_STATIONS_TIMEOUT_MS
+        )} reached at stopping charging stations`
+        logger.warn(
+          `${this.logPrefix()} ${moduleName}.waitChargingStationsStopped: ${timeoutMessage}`
+        )
+        reject(new BaseError(timeoutMessage))
+      }, Constants.STOP_CHARGING_STATIONS_TIMEOUT_MS)
+      waitChargingStationEvents(
+        this,
+        ChargingStationWorkerMessageEvents.stopped,
+        this.numberOfStartedChargingStations
+      )
+        .then(events => {
+          resolve('Charging stations stopped')
+          return events
+        })
+        .finally(() => {
+          clearTimeout(waitTimeout)
+        })
+        .catch(reject)
+    })
+  }
+
+  private readonly workerEventAdded = (data: ChargingStationData): void => {
+    if (this.uiServer.setChargingStationData(data.stationInfo.hashId, data)) {
+      this.uiServer.scheduleClientNotification()
+    }
+    logger.info(
+      `${this.logPrefix()} ${moduleName}.workerEventAdded: Charging station ${
+        // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+        data.stationInfo.chargingStationId
+      } (hashId: ${data.stationInfo.hashId}) added (${this.numberOfAddedChargingStations.toString()} added from ${this.numberOfConfiguredChargingStations.toString()} configured and ${this.numberOfProvisionedChargingStations.toString()} provisioned charging station(s))`
+    )
+  }
+
+  private readonly workerEventDeleted = (data: ChargingStationData): void => {
+    if (this.uiServer.deleteChargingStationData(data.stationInfo.hashId)) {
+      this.uiServer.scheduleClientNotification()
+    }
+    const templateStatistics = this.templateStatistics.get(data.stationInfo.templateName)
+    if (templateStatistics != null) {
+      --templateStatistics.added
+      templateStatistics.indexes.delete(data.stationInfo.templateIndex)
+    }
+    logger.info(
+      `${this.logPrefix()} ${moduleName}.workerEventDeleted: Charging station ${
+        // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+        data.stationInfo.chargingStationId
+      } (hashId: ${data.stationInfo.hashId}) deleted (${this.numberOfAddedChargingStations.toString()} added from ${this.numberOfConfiguredChargingStations.toString()} configured and ${this.numberOfProvisionedChargingStations.toString()} provisioned charging station(s))`
+    )
+  }
+
+  private readonly workerEventPerformanceStatistics = (data: Statistics): void => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    if (isAsyncFunction(this.storage?.storePerformanceStatistics)) {
+      ;(
+        this.storage.storePerformanceStatistics as (
+          performanceStatistics: Statistics
+        ) => Promise<void>
+      )(data).catch((error: unknown) => {
+        logger.error(
+          `${this.logPrefix()} ${moduleName}.workerEventPerformanceStatistics: Error while storing performance statistics:`,
+          error
+        )
+      })
+    } else {
+      ;(this.storage?.storePerformanceStatistics as (performanceStatistics: Statistics) => void)(
+        data
+      )
+    }
+  }
+
+  private readonly workerEventStarted = (data: ChargingStationData): void => {
+    if (this.uiServer.setChargingStationData(data.stationInfo.hashId, data)) {
+      this.uiServer.scheduleClientNotification()
+    }
+    const templateStatistics = this.templateStatistics.get(data.stationInfo.templateName)
+    if (templateStatistics != null) {
+      ++templateStatistics.started
+    }
+    logger.info(
+      `${this.logPrefix()} ${moduleName}.workerEventStarted: Charging station ${
+        // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+        data.stationInfo.chargingStationId
+      } (hashId: ${data.stationInfo.hashId}) started (${this.numberOfStartedChargingStations.toString()} started from ${this.numberOfAddedChargingStations.toString()} added charging station(s))`
+    )
+  }
+
+  private readonly workerEventStopped = (data: ChargingStationData): void => {
+    if (this.uiServer.setChargingStationData(data.stationInfo.hashId, data)) {
+      this.uiServer.scheduleClientNotification()
+    }
+    const templateStatistics = this.templateStatistics.get(data.stationInfo.templateName)
+    if (templateStatistics != null) {
+      --templateStatistics.started
+    }
+    logger.info(
+      `${this.logPrefix()} ${moduleName}.workerEventStopped: Charging station ${
+        // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+        data.stationInfo.chargingStationId
+      } (hashId: ${data.stationInfo.hashId}) stopped (${this.numberOfStartedChargingStations.toString()} started from ${this.numberOfAddedChargingStations.toString()} added charging station(s))`
+    )
+  }
+
+  private readonly workerEventUpdated = (data: ChargingStationData): void => {
+    if (this.uiServer.setChargingStationData(data.stationInfo.hashId, data)) {
+      this.uiServer.scheduleClientNotification()
+    }
+  }
+}

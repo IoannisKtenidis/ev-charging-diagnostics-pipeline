@@ -1,0 +1,50 @@
+/* Catppuccin Latte */
+
+:root[data-theme='catppuccin-latte'] {
+  /* Palette */
+  --ctp-base: #eff1f5;
+  --ctp-mantle: #e6e9ef;
+  --ctp-crust: #dce0e8;
+  --ctp-surface0: #ccd0da;
+  --ctp-surface1: #bcc0cc;
+  --ctp-text: #4c4f69;
+  --ctp-subtext1: #5c5f77;
+  --ctp-overlay1: #8c8fa1;
+  --ctp-blue: #1e66f5;
+  --ctp-lavender: #7287fd;
+  --ctp-green: #2e7d32;
+  --ctp-orange: #ef6c00;
+  --ctp-red: #c62828;
+
+  /* Semantic */
+  --color-bg: var(--ctp-base);
+  --color-bg-surface: var(--ctp-mantle);
+  --color-bg-input: var(--ctp-crust);
+  --color-bg-hover: var(--ctp-surface0);
+  --color-bg-active: var(--ctp-surface1);
+  --color-bg-header: var(--ctp-mantle);
+  --color-bg-caption: var(--ctp-crust);
+  --color-bg-button: var(--ctp-blue);
+  --color-bg-button-hover: color-mix(in srgb, var(--ctp-blue) 67%, transparent);
+  --color-text: var(--ctp-subtext1);
+  --color-text-strong: var(--ctp-text);
+  --color-text-muted: var(--ctp-overlay1);
+  --color-text-on-button: var(--ctp-base);
+  --color-primary: var(--ctp-blue);
+  --color-border: var(--ctp-crust);
+  --color-border-row: var(--ctp-surface0);
+  --color-accent: var(--ctp-lavender);
+  --color-shadow-inset: rgba(0, 0, 0, 0.1);
+
+  /* Surface hierarchy */
+  --color-bg-raised: var(--ctp-base);
+  --color-bg-sunken: var(--ctp-crust);
+
+  /* State colors (Material 700 for light mode readability) */
+  --color-state-ok: var(--ctp-green);
+  --color-state-warn: var(--ctp-orange);
+  --color-state-err: var(--ctp-red);
+  --color-state-idle: var(--ctp-overlay1);
+
+  color-scheme: light;
+}

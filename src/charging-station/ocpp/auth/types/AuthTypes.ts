@@ -1,0 +1,569 @@
+import type {
+  JsonObject,
+  OCPP20MessageFormatEnumType,
+  OCPPVersion,
+} from '../../../../types/index.js'
+
+import {
+  OCPP16AuthorizationStatus,
+  OCPP20AuthorizationStatusEnumType,
+  OCPP20IdTokenEnumType,
+  RequestStartStopStatusEnumType,
+} from '../../../../types/index.js'
+
+/**
+ * Authentication context for strategy selection
+ */
+export enum AuthContext {
+  REMOTE_START = 'RemoteStart',
+  REMOTE_STOP = 'RemoteStop',
+  RESERVATION = 'Reservation',
+  TRANSACTION_START = 'TransactionStart',
+  TRANSACTION_STOP = 'TransactionStop',
+  UNLOCK_CONNECTOR = 'UnlockConnector',
+}
+
+/**
+ * Authentication method strategies
+ */
+export enum AuthenticationMethod {
+  CACHE = 'Cache',
+  CERTIFICATE_BASED = 'CertificateBased',
+  LOCAL_LIST = 'LocalList',
+  NONE = 'None',
+  OFFLINE_FALLBACK = 'OfflineFallback',
+  REMOTE_AUTHORIZATION = 'RemoteAuthorization',
+}
+
+/**
+ * Authentication error types
+ */
+export enum AuthErrorCode {
+  ADAPTER_ERROR = 'ADAPTER_ERROR',
+  CACHE_ERROR = 'CACHE_ERROR',
+  CERTIFICATE_ERROR = 'CERTIFICATE_ERROR',
+  CONFIGURATION_ERROR = 'CONFIGURATION_ERROR',
+  INVALID_IDENTIFIER = 'INVALID_IDENTIFIER',
+  LOCAL_LIST_ERROR = 'LOCAL_LIST_ERROR',
+  NETWORK_ERROR = 'NETWORK_ERROR',
+  STRATEGY_ERROR = 'STRATEGY_ERROR',
+  TIMEOUT = 'TIMEOUT',
+  UNSUPPORTED_TYPE = 'UNSUPPORTED_TYPE',
+}
+
+/**
+ * Authorization status combining OCPP 1.6 and 2.0 statuses
+ */
+export enum AuthorizationStatus {
+  // Common statuses across versions
+  ACCEPTED = 'Accepted',
+  BLOCKED = 'Blocked',
+  // OCPP 1.6 specific
+  CONCURRENT_TX = 'ConcurrentTx',
+  EXPIRED = 'Expired',
+
+  INVALID = 'Invalid',
+
+  // OCPP 2.0 specific
+  NO_CREDIT = 'NoCredit',
+
+  NOT_ALLOWED_TYPE_EVSE = 'NotAllowedTypeEVSE',
+  NOT_AT_THIS_LOCATION = 'NotAtThisLocation',
+  NOT_AT_THIS_TIME = 'NotAtThisTime',
+  // Internal statuses
+  PENDING = 'Pending',
+  UNKNOWN = 'Unknown',
+}
+
+/**
+ * Identifier types combining OCPP 1.6 and 2.0 token types
+ */
+export enum IdentifierType {
+  BIOMETRIC = 'Biometric',
+
+  // OCPP 2.0 types (mapped from OCPP20IdTokenEnumType)
+  CENTRAL = 'Central',
+  // Future extensibility
+  CERTIFICATE = 'Certificate',
+  E_MAID = 'eMAID',
+  // OCPP 1.6 standard - simple ID tag
+  ID_TAG = 'IdTag',
+  ISO14443 = 'ISO14443',
+  ISO15693 = 'ISO15693',
+  KEY_CODE = 'KeyCode',
+  LOCAL = 'Local',
+
+  MAC_ADDRESS = 'MacAddress',
+  MOBILE_APP = 'MobileApp',
+  NO_AUTHORIZATION = 'NoAuthorization',
+}
+
+/**
+ * Configuration for authentication behavior
+ */
+export interface AuthConfiguration extends JsonObject {
+  /** Allow offline transactions when authorized */
+  allowOfflineTxForUnknownId: boolean
+
+  /** Enable authorization key management */
+  authKeyManagementEnabled?: boolean
+
+  /** Enable authorization cache */
+  authorizationCacheEnabled: boolean
+
+  /** Cache lifetime in seconds */
+  authorizationCacheLifetime?: number
+
+  /** Authorization timeout in seconds */
+  authorizationTimeout: number
+
+  /** Enable certificate-based authentication */
+  certificateAuthEnabled: boolean
+
+  /** Enable strict certificate validation (default: false) */
+  certificateValidationStrict?: boolean
+
+  /**
+   * Disable post-authorize behavior for non-Accepted cached/local list tokens (OCPP 2.0).
+   * When true, non-Accepted tokens from cache or local list are accepted locally without
+   * triggering a remote AuthorizationRequest (C10.FR.03, C12.FR.05, C14.FR.03).
+   * When false, non-Accepted cached/local tokens trigger re-authorization via remote.
+   * When undefined, existing behavior is preserved (no filtering).
+   */
+  disablePostAuthorize?: boolean
+
+  /** Enable local authorization list */
+  localAuthListEnabled: boolean
+
+  /** Local pre-authorize mode */
+  localPreAuthorize: boolean
+
+  /** Maximum cache entries */
+  maxCacheEntries?: number
+
+  /** Maximum local auth list entries */
+  maxLocalAuthListEntries?: number
+
+  /** OCPP protocol version configured on the charging station */
+  ocppVersion?: string
+
+  /** Enable offline authorization */
+  offlineAuthorizationEnabled: boolean
+
+  /** Enable remote authorization (OCPP communication) */
+  remoteAuthorization?: boolean
+
+  /** Default authorization status for unknown IDs */
+  unknownIdAuthorization?: AuthorizationStatus
+}
+
+/**
+ * Authorization result with version-agnostic information
+ */
+export interface AuthorizationResult {
+  /** Additional authorization info */
+  readonly additionalInfo?: Record<string, unknown>
+
+  /** Cache TTL in seconds (for caching strategies) */
+  readonly cacheTtl?: number
+
+  /** Expiry date if applicable */
+  readonly expiryDate?: Date
+
+  /** Group identifier for group auth */
+  readonly groupId?: string
+
+  /** Whether this was an offline authorization */
+  readonly isOffline: boolean
+
+  /** Language for user messages */
+  readonly language?: string
+
+  /** Authentication method used */
+  readonly method: AuthenticationMethod
+
+  /** Parent identifier for hierarchical auth */
+  readonly parentId?: string
+
+  /** Personal message for user display */
+  readonly personalMessage?: {
+    content: string
+    format: OCPP20MessageFormatEnumType
+    language?: string
+  }
+
+  /** Authorization status */
+  readonly status: AuthorizationStatus
+
+  /** Timestamp of authorization */
+  readonly timestamp: Date
+}
+
+/**
+ * Authentication request context
+ */
+export interface AuthRequest {
+  /** Whether offline mode is enabled */
+  readonly allowOffline: boolean
+
+  /** Connector ID if applicable */
+  readonly connectorId?: number
+
+  /** Authentication context */
+  readonly context: AuthContext
+
+  /** EVSE ID for OCPP 2.0 */
+  readonly evseId?: number
+
+  /** Identifier to authenticate */
+  readonly identifier: Identifier
+
+  /** Additional context data */
+  readonly metadata?: Record<string, unknown>
+
+  /** Remote start ID for remote transactions */
+  readonly remoteStartId?: number
+
+  /** Reservation ID if applicable */
+  readonly reservationId?: number
+
+  /** Request timestamp */
+  readonly timestamp: Date
+
+  /** Transaction ID for stop authorization */
+  readonly transactionId?: number | string
+}
+
+/**
+ * Certificate hash data for PKI-based authentication (OCPP 2.0+)
+ */
+export interface CertificateHashData {
+  /** Hash algorithm used (SHA256, SHA384, SHA512, etc.) */
+  readonly hashAlgorithm: string
+
+  /** Hash of the certificate issuer's public key */
+  readonly issuerKeyHash: string
+
+  /** Hash of the certificate issuer's distinguished name */
+  readonly issuerNameHash: string
+
+  /** Certificate serial number */
+  readonly serialNumber: string
+}
+
+/**
+ * Identifier that works across OCPP versions
+ */
+export interface Identifier {
+  /** Additional info for OCPP 2.0 tokens */
+  readonly additionalInfo?: Record<string, string>
+
+  /** Certificate hash data for PKI-based authentication */
+  readonly certificateHashData?: CertificateHashData
+
+  /** Group identifier for group-based authorization (OCPP 2.0) */
+  readonly groupId?: string
+
+  /** Parent ID for hierarchical authorization (OCPP 1.6) */
+  readonly parentId?: string
+
+  /** Type of identifier */
+  readonly type: IdentifierType
+
+  /** The identifier value (idTag in 1.6, idToken in 2.0) */
+  readonly value: string
+}
+
+/**
+ * Authentication error with context
+ */
+export class AuthenticationError extends Error {
+  public readonly code: AuthErrorCode
+  public readonly context?: AuthContext
+  public readonly identifier?: string
+  public override name = 'AuthenticationError'
+
+  public readonly ocppVersion?: OCPPVersion
+
+  constructor (
+    message: string,
+    code: AuthErrorCode,
+    options?: {
+      cause?: Error
+      context?: AuthContext
+      identifier?: string
+      ocppVersion?: OCPPVersion
+    }
+  ) {
+    super(message, { cause: options?.cause })
+    this.code = code
+    this.identifier = options?.identifier
+    this.context = options?.context
+    this.ocppVersion = options?.ocppVersion
+  }
+}
+
+/**
+ * Type guards for identifier types
+ */
+
+/**
+ * Check if identifier type is certificate-based
+ * @param type - Identifier type to check
+ * @returns True if certificate-based
+ */
+export const isCertificateBased = (type: IdentifierType): boolean => {
+  return type === IdentifierType.CERTIFICATE
+}
+
+/**
+ * Check if identifier type is OCPP 1.6 compatible
+ * @param type - Identifier type to check
+ * @returns True if OCPP 1.6 type
+ */
+export const isOCPP16Type = (type: IdentifierType): boolean => {
+  return type === IdentifierType.ID_TAG
+}
+
+/**
+ * Check if identifier type is OCPP 2.0 compatible
+ * @param type - Identifier type to check
+ * @returns True if OCPP 2.0 type
+ */
+export const isOCPP20Type = (type: IdentifierType): boolean => {
+  return Object.values(OCPP20IdTokenEnumType).includes(type as unknown as OCPP20IdTokenEnumType)
+}
+
+/**
+ * Check if identifier type requires additional information
+ * @param type - Identifier type to check
+ * @returns True if additional info is required
+ */
+export const requiresAdditionalInfo = (type: IdentifierType): boolean => {
+  return [
+    IdentifierType.E_MAID,
+    IdentifierType.ISO14443,
+    IdentifierType.ISO15693,
+    IdentifierType.MAC_ADDRESS,
+  ].includes(type)
+}
+
+/**
+ * Type mappers for OCPP version compatibility
+ *
+ * Provides bidirectional mapping between OCPP version-specific types and auth types.
+ * This allows the authentication system to work seamlessly across OCPP 1.6 and 2.0.
+ * @remarks
+ * **Edge cases and limitations:**
+ * - OCPP 2.0 specific statuses (NOT_AT_THIS_LOCATION, NOT_AT_THIS_TIME, PENDING, UNKNOWN)
+ *   map to INVALID when converting to OCPP 1.6
+ * - OCPP 2.0 IdToken types have more granularity than OCPP 1.6 IdTag
+ * - Certificate-based auth (IdentifierType.CERTIFICATE) is only available in OCPP 2.0+
+ * - When mapping to OCPP 2.0, unsupported types default to Local
+ */
+
+/**
+ * Maps OCPP 1.6 authorization status to authorization status
+ * @param status - OCPP 1.6 authorization status
+ * @returns Authorization status
+ * @example
+ * ```typescript
+ * const status = mapOCPP16Status(OCPP16AuthorizationStatus.ACCEPTED)
+ * // Returns: AuthorizationStatus.ACCEPTED
+ * ```
+ */
+export const mapOCPP16Status = (status: OCPP16AuthorizationStatus): AuthorizationStatus => {
+  switch (status) {
+    case OCPP16AuthorizationStatus.ACCEPTED:
+      return AuthorizationStatus.ACCEPTED
+    case OCPP16AuthorizationStatus.BLOCKED:
+      return AuthorizationStatus.BLOCKED
+    case OCPP16AuthorizationStatus.CONCURRENT_TX:
+      return AuthorizationStatus.CONCURRENT_TX
+    case OCPP16AuthorizationStatus.EXPIRED:
+      return AuthorizationStatus.EXPIRED
+    case OCPP16AuthorizationStatus.INVALID:
+      return AuthorizationStatus.INVALID
+    default:
+      return AuthorizationStatus.INVALID
+  }
+}
+
+/**
+ * Maps OCPP 2.0 authorization status enum to authorization status
+ * @param status - OCPP 2.0 authorization status
+ * @returns Authorization status
+ * @example
+ * ```typescript
+ * const status = mapOCPP20AuthorizationStatus(OCPP20AuthorizationStatusEnumType.Accepted)
+ * // Returns: AuthorizationStatus.ACCEPTED
+ * ```
+ */
+export const mapOCPP20AuthorizationStatus = (
+  status: OCPP20AuthorizationStatusEnumType
+): AuthorizationStatus => {
+  switch (status) {
+    case OCPP20AuthorizationStatusEnumType.Accepted:
+      return AuthorizationStatus.ACCEPTED
+    case OCPP20AuthorizationStatusEnumType.Blocked:
+      return AuthorizationStatus.BLOCKED
+    case OCPP20AuthorizationStatusEnumType.ConcurrentTx:
+      return AuthorizationStatus.CONCURRENT_TX
+    case OCPP20AuthorizationStatusEnumType.Expired:
+      return AuthorizationStatus.EXPIRED
+    case OCPP20AuthorizationStatusEnumType.Invalid:
+      return AuthorizationStatus.INVALID
+    case OCPP20AuthorizationStatusEnumType.NoCredit:
+      return AuthorizationStatus.NO_CREDIT
+    case OCPP20AuthorizationStatusEnumType.NotAllowedTypeEVSE:
+      return AuthorizationStatus.NOT_ALLOWED_TYPE_EVSE
+    case OCPP20AuthorizationStatusEnumType.NotAtThisLocation:
+      return AuthorizationStatus.NOT_AT_THIS_LOCATION
+    case OCPP20AuthorizationStatusEnumType.NotAtThisTime:
+      return AuthorizationStatus.NOT_AT_THIS_TIME
+    case OCPP20AuthorizationStatusEnumType.Unknown:
+      return AuthorizationStatus.UNKNOWN
+    default:
+      return AuthorizationStatus.INVALID
+  }
+}
+
+/**
+ * Maps OCPP 2.0 token type to identifier type
+ * @param type - OCPP 2.0 token type
+ * @returns Identifier type
+ * @example
+ * ```typescript
+ * const identifierType = mapOCPP20TokenType(OCPP20IdTokenEnumType.ISO14443)
+ * // Returns: IdentifierType.ISO14443
+ * ```
+ */
+export const mapOCPP20TokenType = (type: OCPP20IdTokenEnumType): IdentifierType => {
+  switch (type) {
+    case OCPP20IdTokenEnumType.Central:
+      return IdentifierType.CENTRAL
+    case OCPP20IdTokenEnumType.eMAID:
+      return IdentifierType.E_MAID
+    case OCPP20IdTokenEnumType.ISO14443:
+      return IdentifierType.ISO14443
+    case OCPP20IdTokenEnumType.ISO15693:
+      return IdentifierType.ISO15693
+    case OCPP20IdTokenEnumType.KeyCode:
+      return IdentifierType.KEY_CODE
+    case OCPP20IdTokenEnumType.Local:
+      return IdentifierType.LOCAL
+    case OCPP20IdTokenEnumType.MacAddress:
+      return IdentifierType.MAC_ADDRESS
+    case OCPP20IdTokenEnumType.NoAuthorization:
+      return IdentifierType.NO_AUTHORIZATION
+    default:
+      return IdentifierType.LOCAL
+  }
+}
+
+/**
+ * Maps authorization status to OCPP 1.6 status
+ * @param status - Authorization status
+ * @returns OCPP 1.6 authorization status
+ * @example
+ * ```typescript
+ * const ocpp16Status = mapToOCPP16Status(AuthorizationStatus.ACCEPTED)
+ * // Returns: OCPP16AuthorizationStatus.ACCEPTED
+ * ```
+ */
+export const mapToOCPP16Status = (status: AuthorizationStatus): OCPP16AuthorizationStatus => {
+  switch (status) {
+    case AuthorizationStatus.ACCEPTED:
+      return OCPP16AuthorizationStatus.ACCEPTED
+    case AuthorizationStatus.BLOCKED:
+      return OCPP16AuthorizationStatus.BLOCKED
+    case AuthorizationStatus.CONCURRENT_TX:
+      return OCPP16AuthorizationStatus.CONCURRENT_TX
+    case AuthorizationStatus.EXPIRED:
+      return OCPP16AuthorizationStatus.EXPIRED
+    case AuthorizationStatus.INVALID:
+    case AuthorizationStatus.NOT_AT_THIS_LOCATION:
+    case AuthorizationStatus.NOT_AT_THIS_TIME:
+    case AuthorizationStatus.PENDING:
+    case AuthorizationStatus.UNKNOWN:
+    default:
+      return OCPP16AuthorizationStatus.INVALID
+  }
+}
+
+/**
+ * Maps authorization status to OCPP 2.0 RequestStartStopStatus
+ * @param status - Authorization status
+ * @returns OCPP 2.0 RequestStartStopStatus
+ * @example
+ * ```typescript
+ * const ocpp20Status = mapToOCPP20Status(AuthorizationStatus.ACCEPTED)
+ * // Returns: RequestStartStopStatusEnumType.Accepted
+ * ```
+ */
+export const mapToOCPP20Status = (status: AuthorizationStatus): RequestStartStopStatusEnumType => {
+  switch (status) {
+    case AuthorizationStatus.ACCEPTED:
+      return RequestStartStopStatusEnumType.Accepted
+    case AuthorizationStatus.BLOCKED:
+    case AuthorizationStatus.CONCURRENT_TX:
+    case AuthorizationStatus.EXPIRED:
+    case AuthorizationStatus.INVALID:
+    case AuthorizationStatus.NOT_AT_THIS_LOCATION:
+    case AuthorizationStatus.NOT_AT_THIS_TIME:
+    case AuthorizationStatus.PENDING:
+    case AuthorizationStatus.UNKNOWN:
+    default:
+      return RequestStartStopStatusEnumType.Rejected
+  }
+}
+
+/**
+ * Maps identifier type to OCPP 2.0 token type
+ * @param type - Identifier type
+ * @returns OCPP 2.0 token type
+ * @example
+ * ```typescript
+ * const ocpp20Type = mapToOCPP20TokenType(IdentifierType.CENTRAL)
+ * // Returns: OCPP20IdTokenEnumType.Central
+ * ```
+ */
+export const mapToOCPP20TokenType = (type: IdentifierType): OCPP20IdTokenEnumType => {
+  switch (type) {
+    case IdentifierType.CENTRAL:
+      return OCPP20IdTokenEnumType.Central
+    case IdentifierType.E_MAID:
+      return OCPP20IdTokenEnumType.eMAID
+    case IdentifierType.ID_TAG:
+    case IdentifierType.LOCAL:
+      return OCPP20IdTokenEnumType.Local
+    case IdentifierType.ISO14443:
+      return OCPP20IdTokenEnumType.ISO14443
+    case IdentifierType.ISO15693:
+      return OCPP20IdTokenEnumType.ISO15693
+    case IdentifierType.KEY_CODE:
+      return OCPP20IdTokenEnumType.KeyCode
+    case IdentifierType.MAC_ADDRESS:
+      return OCPP20IdTokenEnumType.MacAddress
+    case IdentifierType.NO_AUTHORIZATION:
+      return OCPP20IdTokenEnumType.NoAuthorization
+    default:
+      return OCPP20IdTokenEnumType.Local
+  }
+}
+
+export const enhanceAuthResult = (
+  result: AuthorizationResult,
+  method: AuthenticationMethod,
+  strategyName: string,
+  startTime: number
+): AuthorizationResult => ({
+  ...result,
+  additionalInfo: {
+    ...result.additionalInfo,
+    responseTimeMs: Date.now() - startTime,
+    strategy: strategyName,
+  },
+  method,
+  timestamp: new Date(),
+})

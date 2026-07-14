@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": ["@tsconfig/node24/tsconfig.json", "@vue/tsconfig/tsconfig.dom.json"],
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "noImplicitOverride": true,
+    "sourceMap": true,
+    "composite": true,
+    "types": ["node", "jsdom"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["*.ts", "src/**/*.ts", "src/**/*.vue", "tests/**/*.ts"]
+}

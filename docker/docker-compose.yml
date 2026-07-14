@@ -1,0 +1,15 @@
+networks:
+  ev_network:
+    driver: bridge
+services:
+  e-mobility-charging-stations-simulator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        STACK_TRACE_LIMIT: 1024
+        MAX_OLD_SPACE_SIZE: 768
+    networks:
+      - ev_network
+    ports:
+      - 127.0.0.1:8080:8080

@@ -1,0 +1,51 @@
+/* Tokyo Night Storm */
+
+:root[data-theme='tokyo-night-storm'] {
+  /* Palette */
+  --tn-bg-dark: #1f2335;
+  --tn-bg-base: #24283b;
+  --tn-bg-raised: #1b1e2e;
+  --tn-bg-hover: #292e42;
+  --tn-bg-active: #2c324a;
+  --tn-fg-base: #a9b1d6;
+  --tn-fg-bright: #c0caf5;
+  --tn-fg-muted: #8089b3;
+  --tn-blue: #7aa2f7;
+  --tn-accent: #3d59a1;
+  --tn-green: #66bb6a;
+  --tn-amber: #ffb300;
+  --tn-red: #ef5350;
+  --tn-white: #ffffff;
+
+  /* Semantic */
+  --color-bg: var(--tn-bg-base);
+  --color-bg-surface: var(--tn-bg-dark);
+  --color-bg-input: var(--tn-bg-raised);
+  --color-bg-hover: var(--tn-bg-hover);
+  --color-bg-active: var(--tn-bg-active);
+  --color-bg-header: var(--tn-bg-dark);
+  --color-bg-caption: var(--tn-bg-raised);
+  --color-bg-button: var(--tn-accent);
+  --color-bg-button-hover: color-mix(in srgb, var(--tn-accent) 67%, transparent);
+  --color-text: var(--tn-fg-base);
+  --color-text-strong: var(--tn-fg-bright);
+  --color-text-muted: var(--tn-fg-muted);
+  --color-text-on-button: var(--tn-white);
+  --color-primary: var(--tn-blue);
+  --color-border: var(--tn-bg-raised);
+  --color-border-row: var(--tn-bg-hover);
+  --color-accent: var(--tn-accent);
+  --color-shadow-inset: rgba(0, 0, 0, 0.4);
+
+  /* Surface hierarchy */
+  --color-bg-raised: var(--tn-bg-hover);
+  --color-bg-sunken: var(--tn-bg-raised);
+
+  /* State colors */
+  --color-state-ok: var(--tn-green);
+  --color-state-warn: var(--tn-amber);
+  --color-state-err: var(--tn-red);
+  --color-state-idle: var(--tn-fg-muted);
+
+  color-scheme: dark;
+}

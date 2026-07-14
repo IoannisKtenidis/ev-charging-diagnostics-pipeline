@@ -1,0 +1,98 @@
+// Copyright Jerome Benoit. 2021-2025. All Rights Reserved.
+
+import { existsSync, mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
+import { URL } from 'node:url'
+
+import {
+  DBName,
+  type EmptyObject,
+  type HandleErrorParams,
+  type Statistics,
+  StorageType,
+} from '../../types/index.js'
+import { logger } from '../../utils/index.js'
+
+export abstract class Storage {
+  private static readonly performanceStatistics = new Map<string, Statistics>()
+  protected dbName!: string
+  protected readonly logPrefix: string
+  protected readonly storageUri: URL
+
+  constructor (storageUri: string, logPrefix: string) {
+    this.storageUri = new URL(storageUri)
+    this.logPrefix = logPrefix
+  }
+
+  public abstract close (): Promise<void> | void
+
+  public getPerformanceStatistics (): IterableIterator<Statistics> {
+    return Storage.performanceStatistics.values()
+  }
+
+  public abstract open (): Promise<void> | void
+
+  public abstract storePerformanceStatistics (
+    performanceStatistics: Statistics
+  ): Promise<void> | void
+
+  protected clearPerformanceStatistics (): void {
+    Storage.performanceStatistics.clear()
+  }
+
+  protected ensureDBDirectory (): void {
+    if (!existsSync(dirname(this.dbName))) {
+      mkdirSync(dirname(this.dbName), { recursive: true })
+    }
+  }
+
+  protected getDBNameFromStorageType (type: StorageType): DBName | undefined {
+    switch (type) {
+      case StorageType.MARIA_DB:
+        return DBName.MARIA_DB
+      case StorageType.MONGO_DB:
+        return DBName.MONGO_DB
+      case StorageType.MYSQL:
+        return DBName.MYSQL
+      case StorageType.SQLITE:
+        return DBName.SQLITE
+    }
+  }
+
+  protected handleDBStorageError (
+    type: StorageType,
+    error: Error,
+    table?: string,
+    params: HandleErrorParams<EmptyObject> = {
+      consoleOut: false,
+      throwError: false,
+    }
+  ): void {
+    const inTableOrCollectionStr = table != null ? ` in table or collection '${table}'` : ''
+    logger.error(
+      `${this.logPrefix} ${this.getDBNameFromStorageType(type) ?? 'Unknown'} error '${error.message}'${inTableOrCollectionStr}:`,
+      error
+    )
+    if (params.throwError === true) {
+      throw error
+    }
+  }
+
+  protected serializePerformanceStatistics (
+    performanceStatistics: Statistics
+  ): Record<string, unknown> {
+    return {
+      ...performanceStatistics,
+      statisticsData: Array.from(performanceStatistics.statisticsData, ([name, value]) => ({
+        ...value,
+        measurementTimeSeries:
+          value.measurementTimeSeries != null ? [...value.measurementTimeSeries] : undefined,
+        name,
+      })),
+    }
+  }
+
+  protected setPerformanceStatistics (performanceStatistics: Statistics): void {
+    Storage.performanceStatistics.set(performanceStatistics.id, performanceStatistics)
+  }
+}

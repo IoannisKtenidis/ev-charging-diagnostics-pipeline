@@ -1,0 +1,133 @@
+import type { ChargingStation } from '../../charging-station/index.js'
+import type { JsonType } from '../JsonType.js'
+import type { OCPP16MeterValuesResponse } from './1.6/MeterValues.js'
+import type { OCPP20MeterValuesResponse } from './2.0/MeterValues.js'
+import type {
+  OCPP20BootNotificationResponse,
+  OCPP20ClearCacheResponse,
+  OCPP20DataTransferResponse,
+  OCPP20FirmwareStatusNotificationResponse,
+  OCPP20HeartbeatResponse,
+  OCPP20StatusNotificationResponse,
+} from './2.0/Responses.js'
+import type { ErrorType } from './ErrorType.js'
+import type { MessageType } from './MessageType.js'
+
+import {
+  OCPP16AvailabilityStatus,
+  type OCPP16BootNotificationResponse,
+  OCPP16ChargingProfileStatus,
+  OCPP16ClearChargingProfileStatus,
+  OCPP16ConfigurationStatus,
+  type OCPP16DataTransferResponse,
+  OCPP16DataTransferStatus,
+  type OCPP16DiagnosticsStatusNotificationResponse,
+  type OCPP16FirmwareStatusNotificationResponse,
+  type OCPP16HeartbeatResponse,
+  OCPP16ReservationStatus,
+  type OCPP16StatusNotificationResponse,
+  OCPP16TriggerMessageStatus,
+  OCPP16UnlockStatus,
+} from './1.6/Responses.js'
+import {
+  ChangeAvailabilityStatusEnumType,
+  DataTransferStatusEnumType,
+  TriggerMessageStatusEnumType,
+  UnlockStatusEnumType,
+} from './2.0/Common.js'
+import { type GenericResponse, GenericStatus } from './Common.js'
+
+export type BootNotificationResponse =
+  | OCPP16BootNotificationResponse
+  | OCPP20BootNotificationResponse
+
+export type CancelReservationResponse = GenericResponse
+
+export type ClearCacheResponse = GenericResponse | OCPP20ClearCacheResponse
+
+export type DataTransferResponse = OCPP16DataTransferResponse | OCPP20DataTransferResponse
+
+export type DiagnosticsStatusNotificationResponse = OCPP16DiagnosticsStatusNotificationResponse
+
+export type ErrorResponse = [MessageType.CALL_ERROR_MESSAGE, string, ErrorType, string, JsonType]
+
+export type FirmwareStatusNotificationResponse =
+  | OCPP16FirmwareStatusNotificationResponse
+  // eslint-disable-next-line @typescript-eslint/no-duplicate-type-constituents
+  | OCPP20FirmwareStatusNotificationResponse
+
+export type HeartbeatResponse = OCPP16HeartbeatResponse | OCPP20HeartbeatResponse
+
+// eslint-disable-next-line @typescript-eslint/no-duplicate-type-constituents
+export type MeterValuesResponse = OCPP16MeterValuesResponse | OCPP20MeterValuesResponse
+
+export type Response = [MessageType.CALL_RESULT_MESSAGE, string, JsonType]
+
+export type ResponseHandler = (
+  chargingStation: ChargingStation,
+  payload: JsonType,
+  requestPayload?: JsonType
+) => Promise<void> | void
+
+export type StatusNotificationResponse =
+  | OCPP16StatusNotificationResponse
+  // eslint-disable-next-line @typescript-eslint/no-duplicate-type-constituents
+  | OCPP20StatusNotificationResponse
+
+export const AvailabilityStatus = {
+  ...OCPP16AvailabilityStatus,
+  ...ChangeAvailabilityStatusEnumType,
+} as const
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type AvailabilityStatus = ChangeAvailabilityStatusEnumType | OCPP16AvailabilityStatus
+
+export const ChargingProfileStatus = {
+  ...OCPP16ChargingProfileStatus,
+} as const
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type ChargingProfileStatus = OCPP16ChargingProfileStatus
+
+export const ClearChargingProfileStatus = {
+  ...OCPP16ClearChargingProfileStatus,
+} as const
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type ClearChargingProfileStatus = OCPP16ClearChargingProfileStatus
+
+export const ConfigurationStatus = {
+  ...OCPP16ConfigurationStatus,
+} as const
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type ConfigurationStatus = OCPP16ConfigurationStatus
+
+export const UnlockStatus = {
+  ...OCPP16UnlockStatus,
+  ...UnlockStatusEnumType,
+} as const
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type UnlockStatus = OCPP16UnlockStatus | UnlockStatusEnumType
+
+export const TriggerMessageStatus = {
+  ...OCPP16TriggerMessageStatus,
+  ...TriggerMessageStatusEnumType,
+} as const
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type TriggerMessageStatus = OCPP16TriggerMessageStatus | TriggerMessageStatusEnumType
+
+export const DataTransferStatus = {
+  ...OCPP16DataTransferStatus,
+  ...DataTransferStatusEnumType,
+} as const
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type DataTransferStatus = DataTransferStatusEnumType | OCPP16DataTransferStatus
+
+export const ReservationStatus = {
+  ...OCPP16ReservationStatus,
+} as const
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type ReservationStatus = OCPP16ReservationStatus
+
+export const CancelReservationStatus = {
+  ...GenericStatus,
+} as const
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type CancelReservationStatus = GenericStatus

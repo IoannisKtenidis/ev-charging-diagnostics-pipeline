@@ -1,0 +1,1061 @@
+import { millisecondsToSeconds } from 'date-fns'
+
+import { BaseError } from '../../../exception/index.js'
+import {
+  AttributeEnumType,
+  type ComponentType,
+  DataEnumType,
+  GetVariableStatusEnumType,
+  MutabilityEnumType,
+  OCPP20ComponentName,
+  type OCPP20GetVariableDataType,
+  type OCPP20GetVariableResultType,
+  OCPP20OptionalVariableName,
+  OCPP20RequiredVariableName,
+  type OCPP20SetVariableDataType,
+  type OCPP20SetVariableResultType,
+  PersistenceEnumType,
+  ReasonCodeEnumType,
+  SetVariableStatusEnumType,
+  type VariableType,
+} from '../../../types/index.js'
+import { Constants, convertToIntOrNaN, isEmpty, logger } from '../../../utils/index.js'
+import {
+  addConfigurationKey,
+  buildConfigKey,
+  type ChargingStation,
+  getConfigurationKey,
+  setConfigurationKeyValue,
+} from '../../index.js'
+import { OCPP20Constants } from './OCPP20Constants.js'
+import {
+  applyPostProcess,
+  buildCaseInsensitiveCompositeKey,
+  enforceReportingValueSize,
+  getVariableMetadata,
+  resolveValue,
+  validateValue,
+  VARIABLE_REGISTRY,
+  type VariableMetadata,
+} from './OCPP20VariableRegistry.js'
+
+const isOCPP20ComponentName = (name: string): name is OCPP20ComponentName => {
+  return Object.values(OCPP20ComponentName).includes(name as OCPP20ComponentName)
+}
+const isOCPP20RequiredVariableName = (name: string): name is OCPP20RequiredVariableName => {
+  return Object.values(OCPP20RequiredVariableName).includes(name as OCPP20RequiredVariableName)
+}
+
+const computeConfigurationKeyName = (variableMetadata: VariableMetadata): string =>
+  buildConfigKey(variableMetadata.component, variableMetadata.variable, variableMetadata.instance)
+
+export class OCPP20VariableManager {
+  private static instance: null | OCPP20VariableManager = null
+
+  readonly #validComponentNames = new Set<string>(
+    Object.keys(VARIABLE_REGISTRY).map(k => k.split('::')[0])
+  )
+
+  private readonly invalidVariables = new Map<string, Set<string>>() // stationId → composite keys (lower case)
+  private readonly maxSetOverrides = new Map<string, Map<string, string>>() // stationId → composite key → value
+  private readonly minSetOverrides = new Map<string, Map<string, string>>() // stationId → composite key → value
+  private readonly runtimeOverrides = new Map<string, Map<string, string>>() // stationId → composite key → value
+  private readonly validatedStations = new Set<string>() // stationId
+
+  private constructor () {
+    /* This is intentional */
+  }
+
+  public static getInstance (): OCPP20VariableManager {
+    OCPP20VariableManager.instance ??= new OCPP20VariableManager()
+    return OCPP20VariableManager.instance
+  }
+
+  public getVariables (
+    chargingStation: ChargingStation,
+    getVariableData: OCPP20GetVariableDataType[]
+  ): OCPP20GetVariableResultType[] {
+    this.validatePersistentMappings(chargingStation)
+    const results: OCPP20GetVariableResultType[] = []
+    for (const variableData of getVariableData) {
+      try {
+        const result = this.getVariable(chargingStation, variableData)
+        results.push(result)
+      } catch (error) {
+        logger.error(
+          `${chargingStation.logPrefix()} Error getting variable ${variableData.variable.name}:`,
+          error
+        )
+        results.push({
+          attributeStatus: GetVariableStatusEnumType.Rejected,
+          attributeStatusInfo: {
+            additionalInfo: 'Internal error occurred while retrieving variable',
+            reasonCode: ReasonCodeEnumType.InternalError,
+          },
+          attributeType: variableData.attributeType,
+          component: variableData.component,
+          variable: variableData.variable,
+        })
+      }
+    }
+    return results
+  }
+
+  public invalidateMappingsCache (stationId?: string): void {
+    if (stationId != null) {
+      this.validatedStations.delete(stationId)
+      this.invalidVariables.delete(stationId)
+    } else {
+      this.validatedStations.clear()
+      this.invalidVariables.clear()
+    }
+  }
+
+  public resetRuntimeOverrides (stationId?: string): void {
+    if (stationId != null) {
+      this.runtimeOverrides.delete(stationId)
+      this.minSetOverrides.delete(stationId)
+      this.maxSetOverrides.delete(stationId)
+    } else {
+      this.runtimeOverrides.clear()
+      this.minSetOverrides.clear()
+      this.maxSetOverrides.clear()
+    }
+  }
+
+  public setVariables (
+    chargingStation: ChargingStation,
+    setVariableData: OCPP20SetVariableDataType[]
+  ): OCPP20SetVariableResultType[] {
+    this.validatePersistentMappings(chargingStation)
+    const stationId = this.getStationId(chargingStation)
+
+    // Collect paired MinSet/MaxSet entries for atomic cross-validation
+    const pairedBounds = new Map<string, { maxValue?: string; minValue?: string }>()
+    for (const variableData of setVariableData) {
+      const resolvedAttr = variableData.attributeType ?? AttributeEnumType.Actual
+      if (resolvedAttr !== AttributeEnumType.MinSet && resolvedAttr !== AttributeEnumType.MaxSet) {
+        continue
+      }
+      const varKey = buildCaseInsensitiveCompositeKey(
+        variableData.component.name,
+        variableData.component.instance,
+        variableData.variable.name
+      )
+      const pairedBoundsEntry = pairedBounds.get(varKey) ?? {}
+      if (resolvedAttr === AttributeEnumType.MinSet) {
+        pairedBoundsEntry.minValue = variableData.attributeValue
+      } else {
+        pairedBoundsEntry.maxValue = variableData.attributeValue
+      }
+      pairedBounds.set(varKey, pairedBoundsEntry)
+    }
+
+    // Pre-apply coherent MinSet/MaxSet pairs so per-item cross-check sees paired values
+    const savedOverrides = new Map<
+      string,
+      { prevMax: string | undefined; prevMin: string | undefined }
+    >()
+    for (const [varKey, pair] of pairedBounds) {
+      if (pair.minValue == null || pair.maxValue == null) continue
+      const newMin = convertToIntOrNaN(pair.minValue)
+      const newMax = convertToIntOrNaN(pair.maxValue)
+      if (Number.isNaN(newMin) || Number.isNaN(newMax) || newMin > newMax) continue
+      savedOverrides.set(varKey, {
+        prevMax: this.getMaxSetOverrides(stationId).get(varKey),
+        prevMin: this.getMinSetOverrides(stationId).get(varKey),
+      })
+      this.getMinSetOverrides(stationId).set(varKey, pair.minValue)
+      this.getMaxSetOverrides(stationId).set(varKey, pair.maxValue)
+    }
+
+    const results: OCPP20SetVariableResultType[] = []
+    for (const variableData of setVariableData) {
+      try {
+        const result = this.setVariable(chargingStation, variableData)
+        results.push(result)
+      } catch (error) {
+        logger.error(
+          `${chargingStation.logPrefix()} Error setting variable ${variableData.variable.name}:`,
+          error
+        )
+        results.push({
+          attributeStatus: SetVariableStatusEnumType.Rejected,
+          attributeStatusInfo: {
+            additionalInfo: 'Internal error occurred while setting variable',
+            reasonCode: ReasonCodeEnumType.InternalError,
+          },
+          attributeType: variableData.attributeType ?? AttributeEnumType.Actual,
+          component: variableData.component,
+          variable: variableData.variable,
+        })
+      }
+    }
+
+    // Rollback pre-applied overrides for rejected items
+    for (const [varKey, saved] of savedOverrides) {
+      let minRejected = false
+      let maxRejected = false
+      for (let i = 0; i < setVariableData.length; i++) {
+        const data = setVariableData[i]
+        const resolvedAttr = data.attributeType ?? AttributeEnumType.Actual
+        if (
+          resolvedAttr !== AttributeEnumType.MinSet &&
+          resolvedAttr !== AttributeEnumType.MaxSet
+        ) {
+          continue
+        }
+        const itemKey = buildCaseInsensitiveCompositeKey(
+          data.component.name,
+          data.component.instance,
+          data.variable.name
+        )
+        if (itemKey !== varKey) continue
+        if (
+          resolvedAttr === AttributeEnumType.MinSet &&
+          results[i].attributeStatus !== SetVariableStatusEnumType.Accepted
+        ) {
+          minRejected = true
+        }
+        if (
+          resolvedAttr === AttributeEnumType.MaxSet &&
+          results[i].attributeStatus !== SetVariableStatusEnumType.Accepted
+        ) {
+          maxRejected = true
+        }
+      }
+      if (minRejected) {
+        if (saved.prevMin != null) {
+          this.getMinSetOverrides(stationId).set(varKey, saved.prevMin)
+        } else {
+          this.getMinSetOverrides(stationId).delete(varKey)
+        }
+      }
+      if (maxRejected) {
+        if (saved.prevMax != null) {
+          this.getMaxSetOverrides(stationId).set(varKey, saved.prevMax)
+        } else {
+          this.getMaxSetOverrides(stationId).delete(varKey)
+        }
+      }
+    }
+
+    return results
+  }
+
+  public validatePersistentMappings (chargingStation: ChargingStation): void {
+    const stationId = this.getStationId(chargingStation)
+    if (this.validatedStations.has(stationId)) return
+    const invalidVariables = this.getInvalidVariables(stationId)
+    invalidVariables.clear()
+    for (const metaKey of Object.keys(VARIABLE_REGISTRY)) {
+      const variableMetadata = VARIABLE_REGISTRY[metaKey]
+      // Enforce persistent non-write-only variables across components
+      if (variableMetadata.persistence !== PersistenceEnumType.Persistent) {
+        continue
+      }
+      if (variableMetadata.mutability === MutabilityEnumType.WriteOnly) {
+        continue
+      }
+      // Instance-scoped persistent variables are also auto-created when defaultValue is defined
+      const configurationKeyName = computeConfigurationKeyName(variableMetadata)
+      const configurationKey = getConfigurationKey(chargingStation, configurationKeyName)
+      const variableKey = buildCaseInsensitiveCompositeKey(
+        variableMetadata.component,
+        variableMetadata.instance,
+        variableMetadata.variable
+      )
+      if (configurationKey == null) {
+        // Allow size limit variables to remain intentionally unset.
+        if (
+          variableMetadata.variable ===
+            (OCPP20OptionalVariableName.ConfigurationValueSize as string) ||
+          variableMetadata.variable === (OCPP20OptionalVariableName.ValueSize as string) ||
+          variableMetadata.variable === (OCPP20OptionalVariableName.ReportingValueSize as string)
+        ) {
+          continue
+        }
+        // Skip auto-creation for instance-scoped persistent variables (e.g. MessageAttemptInterval)
+        // so that first getVariables call returns default without persisting; persistence occurs on first successful set.
+        if (variableMetadata.instance != null) {
+          continue
+        }
+        const defaultValue = variableMetadata.defaultValue
+        if (defaultValue != null) {
+          addConfigurationKey(chargingStation, configurationKeyName, defaultValue, undefined, {
+            overwrite: false,
+          })
+          logger.info(
+            `${chargingStation.logPrefix()} Added missing configuration key for variable '${configurationKeyName}' with default '${defaultValue}'`
+          )
+        } else {
+          invalidVariables.add(variableKey)
+          if (variableMetadata.required === true) {
+            logger.error(
+              `${chargingStation.logPrefix()} Missing required configuration key mapping and no default for variable '${configurationKeyName}'`
+            )
+          } else {
+            logger.warn(
+              `${chargingStation.logPrefix()} Missing optional configuration key mapping and no default for variable '${configurationKeyName}'`
+            )
+          }
+        }
+      }
+    }
+    this.validatedStations.add(stationId)
+  }
+
+  private getInvalidVariables (stationId: string): Set<string> {
+    let set = this.invalidVariables.get(stationId)
+    if (set == null) {
+      set = new Set<string>()
+      this.invalidVariables.set(stationId, set)
+    }
+    return set
+  }
+
+  private getMaxSetOverrides (stationId: string): Map<string, string> {
+    let map = this.maxSetOverrides.get(stationId)
+    if (map == null) {
+      map = new Map<string, string>()
+      this.maxSetOverrides.set(stationId, map)
+    }
+    return map
+  }
+
+  private getMinSetOverrides (stationId: string): Map<string, string> {
+    let map = this.minSetOverrides.get(stationId)
+    if (map == null) {
+      map = new Map<string, string>()
+      this.minSetOverrides.set(stationId, map)
+    }
+    return map
+  }
+
+  private getRuntimeOverrides (stationId: string): Map<string, string> {
+    let map = this.runtimeOverrides.get(stationId)
+    if (map == null) {
+      map = new Map<string, string>()
+      this.runtimeOverrides.set(stationId, map)
+    }
+    return map
+  }
+
+  private getStationId (chargingStation: ChargingStation): string {
+    const stationId = chargingStation.stationInfo?.hashId
+    if (stationId == null) {
+      throw new BaseError('ChargingStation has no stationInfo.hashId, cannot identify station')
+    }
+    return stationId
+  }
+
+  private getVariable (
+    chargingStation: ChargingStation,
+    variableData: OCPP20GetVariableDataType
+  ): OCPP20GetVariableResultType {
+    const { attributeType, component, variable } = variableData
+    const requestedAttributeType = attributeType
+    const resolvedAttributeType = requestedAttributeType ?? AttributeEnumType.Actual
+    const stationId = this.getStationId(chargingStation)
+    const invalidVariables = this.getInvalidVariables(stationId)
+
+    if (!this.isComponentValid(chargingStation, component)) {
+      return this.rejectGet(
+        variable,
+        component,
+        requestedAttributeType,
+        GetVariableStatusEnumType.UnknownComponent,
+        ReasonCodeEnumType.NotFound,
+        `Component ${component.name} is not supported by this charging station`
+      )
+    }
+
+    if (!this.isVariableSupported(component, variable)) {
+      return this.rejectGet(
+        variable,
+        component,
+        requestedAttributeType,
+        GetVariableStatusEnumType.UnknownVariable,
+        ReasonCodeEnumType.NotFound,
+        `Variable ${variable.name} is not supported for component ${component.name}`
+      )
+    }
+
+    const variableMetadata = getVariableMetadata(
+      component.name,
+      variable.name,
+      variable.instance ?? component.instance
+    )
+    if (
+      variableMetadata?.mutability === MutabilityEnumType.WriteOnly &&
+      resolvedAttributeType === AttributeEnumType.Actual
+    ) {
+      return this.rejectGet(
+        variable,
+        component,
+        resolvedAttributeType,
+        GetVariableStatusEnumType.Rejected,
+        ReasonCodeEnumType.WriteOnly,
+        `Variable ${variable.name} is write-only and cannot be retrieved`
+      )
+    }
+    if (!variableMetadata?.supportedAttributes.includes(resolvedAttributeType)) {
+      return this.rejectGet(
+        variable,
+        component,
+        resolvedAttributeType,
+        GetVariableStatusEnumType.NotSupportedAttributeType,
+        ReasonCodeEnumType.UnsupportedParam,
+        `Attribute type ${resolvedAttributeType} is not supported for variable ${variable.name}`
+      )
+    }
+
+    const variableKey = buildCaseInsensitiveCompositeKey(
+      component.name,
+      component.instance,
+      variable.name
+    )
+    if (invalidVariables.has(variableKey)) {
+      return this.rejectGet(
+        variable,
+        component,
+        resolvedAttributeType,
+        GetVariableStatusEnumType.Rejected,
+        ReasonCodeEnumType.InternalError,
+        'Variable mapping invalid (startup self-check failed)'
+      )
+    }
+
+    if (resolvedAttributeType === AttributeEnumType.MinSet) {
+      if (
+        variableMetadata.min === undefined &&
+        this.getMinSetOverrides(stationId).get(variableKey) == null
+      ) {
+        return this.rejectGet(
+          variable,
+          component,
+          resolvedAttributeType,
+          GetVariableStatusEnumType.NotSupportedAttributeType,
+          ReasonCodeEnumType.UnsupportedParam,
+          `Attribute type ${resolvedAttributeType} is not supported for variable ${variable.name}`
+        )
+      }
+      const minValue =
+        this.getMinSetOverrides(stationId).get(variableKey) ??
+        (variableMetadata.min !== undefined ? variableMetadata.min.toString() : '')
+      return {
+        attributeStatus: GetVariableStatusEnumType.Accepted,
+        attributeType: resolvedAttributeType,
+        attributeValue: minValue,
+        component,
+        variable,
+      }
+    }
+    if (resolvedAttributeType === AttributeEnumType.MaxSet) {
+      if (
+        variableMetadata.max === undefined &&
+        this.getMaxSetOverrides(stationId).get(variableKey) == null
+      ) {
+        return this.rejectGet(
+          variable,
+          component,
+          resolvedAttributeType,
+          GetVariableStatusEnumType.NotSupportedAttributeType,
+          ReasonCodeEnumType.UnsupportedParam,
+          `Attribute type ${resolvedAttributeType} is not supported for variable ${variable.name}`
+        )
+      }
+      const maxValue =
+        this.getMaxSetOverrides(stationId).get(variableKey) ??
+        (variableMetadata.max !== undefined ? variableMetadata.max.toString() : '')
+      return {
+        attributeStatus: GetVariableStatusEnumType.Accepted,
+        attributeType: resolvedAttributeType,
+        attributeValue: maxValue,
+        component,
+        variable,
+      }
+    }
+
+    let variableValue = this.resolveVariableValue(chargingStation, component, variable)
+
+    if (isEmpty(variableValue)) {
+      if (
+        resolvedAttributeType === AttributeEnumType.Target &&
+        variableMetadata.supportsTarget === true
+      ) {
+        // Accept empty Target value when target is unset (B06.FR.13)
+        return {
+          attributeStatus: GetVariableStatusEnumType.Accepted,
+          attributeType: resolvedAttributeType,
+          attributeValue: '',
+          component,
+          variable,
+        }
+      }
+      return this.rejectGet(
+        variable,
+        component,
+        resolvedAttributeType,
+        GetVariableStatusEnumType.Rejected,
+        ReasonCodeEnumType.InvalidValue,
+        'Resolved variable value is empty'
+      )
+    }
+
+    // ReportingValueSize truncation (DeviceDataCtrlr authoritative)
+    const reportingValueSizeKey = buildCaseInsensitiveCompositeKey(
+      OCPP20ComponentName.DeviceDataCtrlr,
+      undefined,
+      OCPP20OptionalVariableName.ReportingValueSize
+    )
+    // ValueSize truncation applied before ReportingValueSize if present
+    const valueSizeKey = buildCaseInsensitiveCompositeKey(
+      OCPP20ComponentName.DeviceDataCtrlr,
+      undefined,
+      OCPP20OptionalVariableName.ValueSize
+    )
+    let valueSize: string | undefined
+    let reportingValueSize: string | undefined
+    if (!invalidVariables.has(valueSizeKey)) {
+      valueSize = getConfigurationKey(
+        chargingStation,
+        buildConfigKey(OCPP20ComponentName.DeviceDataCtrlr, OCPP20OptionalVariableName.ValueSize)
+      )?.value
+    }
+    if (!invalidVariables.has(reportingValueSizeKey)) {
+      reportingValueSize = getConfigurationKey(
+        chargingStation,
+        buildConfigKey(
+          OCPP20ComponentName.DeviceDataCtrlr,
+          OCPP20OptionalVariableName.ReportingValueSize
+        )
+      )?.value
+    }
+    // Apply ValueSize first then ReportingValueSize
+    if (valueSize) {
+      variableValue = enforceReportingValueSize(variableValue, valueSize)
+    }
+    if (reportingValueSize) {
+      variableValue = enforceReportingValueSize(variableValue, reportingValueSize)
+    }
+
+    // Final absolute length enforcement (spec maxLength OCPP20Constants.MAX_VARIABLE_VALUE_LENGTH)
+    if (variableValue.length > OCPP20Constants.MAX_VARIABLE_VALUE_LENGTH) {
+      variableValue = variableValue.slice(0, OCPP20Constants.MAX_VARIABLE_VALUE_LENGTH)
+    }
+    return {
+      attributeStatus: GetVariableStatusEnumType.Accepted,
+      attributeType: resolvedAttributeType,
+      attributeValue: variableValue,
+      component,
+      variable,
+    }
+  }
+
+  private isComponentValid (_chargingStation: ChargingStation, component: ComponentType): boolean {
+    return this.#validComponentNames.has(component.name)
+  }
+
+  private isVariableSupported (component: ComponentType, variable: VariableType): boolean {
+    return (
+      getVariableMetadata(component.name, variable.name, variable.instance ?? component.instance) !=
+        null || getVariableMetadata(component.name, variable.name) != null
+    )
+  }
+
+  private rejectGet (
+    variable: VariableType,
+    component: ComponentType,
+    attributeType: AttributeEnumType | undefined,
+    status: GetVariableStatusEnumType,
+    reason: ReasonCodeEnumType,
+    info: string
+  ): OCPP20GetVariableResultType {
+    const truncatedInfo = info.length > 50 ? info.slice(0, 50) : info
+    return {
+      attributeStatus: status,
+      attributeStatusInfo: {
+        additionalInfo: truncatedInfo,
+        reasonCode: reason,
+      },
+      attributeType: attributeType ?? AttributeEnumType.Actual,
+      component,
+      variable,
+    }
+  }
+
+  private rejectSet (
+    variable: VariableType,
+    component: ComponentType,
+    attributeType: AttributeEnumType,
+    status: SetVariableStatusEnumType,
+    reason: ReasonCodeEnumType,
+    info: string
+  ): OCPP20SetVariableResultType {
+    const truncatedInfo = info.length > 50 ? info.slice(0, 50) : info
+    return {
+      attributeStatus: status,
+      attributeStatusInfo: {
+        additionalInfo: truncatedInfo,
+        reasonCode: reason,
+      },
+      attributeType,
+      component,
+      variable,
+    }
+  }
+
+  private resolveVariableValue (
+    chargingStation: ChargingStation,
+    component: ComponentType,
+    variable: VariableType
+  ): string {
+    const variableMetadata = getVariableMetadata(
+      component.name,
+      variable.name,
+      variable.instance ?? component.instance
+    )
+    if (!variableMetadata) return ''
+
+    const compositeKey = buildCaseInsensitiveCompositeKey(
+      component.name,
+      component.instance,
+      variable.name
+    )
+
+    let value = resolveValue(chargingStation, variableMetadata)
+
+    if (
+      variableMetadata.persistence === PersistenceEnumType.Persistent &&
+      variableMetadata.mutability !== MutabilityEnumType.WriteOnly
+    ) {
+      const configurationKeyName = computeConfigurationKeyName(variableMetadata)
+      let cfg = getConfigurationKey(chargingStation, configurationKeyName)
+
+      if (cfg == null) {
+        addConfigurationKey(
+          chargingStation,
+          configurationKeyName,
+          value, // Use the resolved default value
+          undefined,
+          {
+            overwrite: false,
+          }
+        )
+        cfg = getConfigurationKey(chargingStation, configurationKeyName)
+      }
+
+      if (cfg?.value) {
+        value = cfg.value
+      }
+    }
+
+    if (
+      variableMetadata.persistence === PersistenceEnumType.Volatile &&
+      variableMetadata.mutability !== MutabilityEnumType.ReadOnly
+    ) {
+      const stationId = this.getStationId(chargingStation)
+      const override = this.getRuntimeOverrides(stationId).get(compositeKey)
+      if (override != null) {
+        value = override
+      }
+    }
+
+    if (
+      variableMetadata.variable === (OCPP20OptionalVariableName.HeartbeatInterval as string) &&
+      !value
+    ) {
+      value = millisecondsToSeconds(chargingStation.getHeartbeatInterval()).toString()
+    }
+    if (
+      variableMetadata.variable === (OCPP20OptionalVariableName.WebSocketPingInterval as string) &&
+      !value
+    ) {
+      value = chargingStation.getWebSocketPingInterval().toString()
+    }
+    if (
+      variableMetadata.variable === (OCPP20RequiredVariableName.TxUpdatedInterval as string) &&
+      !value
+    ) {
+      value = Constants.DEFAULT_TX_UPDATED_INTERVAL_SECONDS.toString()
+    }
+
+    value = applyPostProcess(chargingStation, variableMetadata, value)
+    return value
+  }
+
+  private setVariable (
+    chargingStation: ChargingStation,
+    variableData: OCPP20SetVariableDataType
+  ): OCPP20SetVariableResultType {
+    const { attributeType, attributeValue, component, variable } = variableData
+    const resolvedAttributeType = attributeType ?? AttributeEnumType.Actual
+    const stationId = this.getStationId(chargingStation)
+    const invalidVariables = this.getInvalidVariables(stationId)
+
+    if (!this.isComponentValid(chargingStation, component)) {
+      return this.rejectSet(
+        variable,
+        component,
+        resolvedAttributeType,
+        SetVariableStatusEnumType.UnknownComponent,
+        ReasonCodeEnumType.NotFound,
+        `Component ${component.name} is not supported by this charging station`
+      )
+    }
+    if (!this.isVariableSupported(component, variable)) {
+      return this.rejectSet(
+        variable,
+        component,
+        resolvedAttributeType,
+        SetVariableStatusEnumType.UnknownVariable,
+        ReasonCodeEnumType.NotFound,
+        `Variable ${variable.name} is not supported for component ${component.name}`
+      )
+    }
+
+    const variableMetadata = getVariableMetadata(
+      component.name,
+      variable.name,
+      variable.instance ?? component.instance
+    )
+    if (!variableMetadata?.supportedAttributes.includes(resolvedAttributeType)) {
+      return this.rejectSet(
+        variable,
+        component,
+        resolvedAttributeType,
+        SetVariableStatusEnumType.NotSupportedAttributeType,
+        ReasonCodeEnumType.UnsupportedParam,
+        `Attribute type ${resolvedAttributeType} is not supported for variable ${variable.name}`
+      )
+    }
+
+    const variableKey = buildCaseInsensitiveCompositeKey(
+      component.name,
+      component.instance,
+      variable.name
+    )
+    if (invalidVariables.has(variableKey) && resolvedAttributeType === AttributeEnumType.Actual) {
+      if (variableMetadata.mutability !== MutabilityEnumType.WriteOnly) {
+        return this.rejectSet(
+          variable,
+          component,
+          resolvedAttributeType,
+          SetVariableStatusEnumType.Rejected,
+          ReasonCodeEnumType.InternalError,
+          'Variable mapping invalid (startup self-check failed)'
+        )
+      } else {
+        invalidVariables.delete(variableKey)
+      }
+    }
+
+    // Handle MinSet / MaxSet attribute setting (allowed even if Actual is ReadOnly)
+    if (
+      resolvedAttributeType === AttributeEnumType.MinSet ||
+      resolvedAttributeType === AttributeEnumType.MaxSet
+    ) {
+      if (variableMetadata.dataType !== DataEnumType.integer) {
+        return this.rejectSet(
+          variable,
+          component,
+          resolvedAttributeType,
+          SetVariableStatusEnumType.Rejected,
+          ReasonCodeEnumType.InvalidValue,
+          'MinSet/MaxSet only valid for integer data type'
+        )
+      }
+      const signedIntegerPattern = /^-?\d+$/
+      if (!signedIntegerPattern.test(attributeValue)) {
+        if (/^-?\d+\.\d+$/.test(attributeValue)) {
+          return this.rejectSet(
+            variable,
+            component,
+            resolvedAttributeType,
+            SetVariableStatusEnumType.Rejected,
+            ReasonCodeEnumType.InvalidValue,
+            'Integer must not be decimal'
+          )
+        }
+        return this.rejectSet(
+          variable,
+          component,
+          resolvedAttributeType,
+          SetVariableStatusEnumType.Rejected,
+          ReasonCodeEnumType.InvalidValue,
+          'Integer required for MinSet/MaxSet'
+        )
+      }
+      const intValue = convertToIntOrNaN(attributeValue)
+      if (Number.isNaN(intValue)) {
+        return this.rejectSet(
+          variable,
+          component,
+          resolvedAttributeType,
+          SetVariableStatusEnumType.Rejected,
+          ReasonCodeEnumType.InvalidValue,
+          'Integer required for MinSet/MaxSet'
+        )
+      }
+      if (variableMetadata.min != null && intValue < variableMetadata.min) {
+        return this.rejectSet(
+          variable,
+          component,
+          resolvedAttributeType,
+          SetVariableStatusEnumType.Rejected,
+          ReasonCodeEnumType.ValueTooLow,
+          'Value below metadata minimum'
+        )
+      }
+      if (variableMetadata.max != null && intValue > variableMetadata.max) {
+        return this.rejectSet(
+          variable,
+          component,
+          resolvedAttributeType,
+          SetVariableStatusEnumType.Rejected,
+          ReasonCodeEnumType.ValueTooHigh,
+          'Value above metadata maximum'
+        )
+      }
+      if (resolvedAttributeType === AttributeEnumType.MinSet) {
+        const currentMax =
+          this.getMaxSetOverrides(stationId).get(variableKey) ??
+          (variableMetadata.max !== undefined ? variableMetadata.max.toString() : undefined)
+        if (currentMax != null && intValue > convertToIntOrNaN(currentMax)) {
+          return this.rejectSet(
+            variable,
+            component,
+            resolvedAttributeType,
+            SetVariableStatusEnumType.Rejected,
+            ReasonCodeEnumType.InvalidValue,
+            'MinSet higher than MaxSet'
+          )
+        }
+        this.getMinSetOverrides(stationId).set(variableKey, attributeValue)
+      } else {
+        const currentMin =
+          this.getMinSetOverrides(stationId).get(variableKey) ??
+          (variableMetadata.min !== undefined ? variableMetadata.min.toString() : undefined)
+        if (currentMin != null && intValue < convertToIntOrNaN(currentMin)) {
+          return this.rejectSet(
+            variable,
+            component,
+            resolvedAttributeType,
+            SetVariableStatusEnumType.Rejected,
+            ReasonCodeEnumType.InvalidValue,
+            'MaxSet lower than MinSet'
+          )
+        }
+        this.getMaxSetOverrides(stationId).set(variableKey, attributeValue)
+      }
+      return {
+        attributeStatus: SetVariableStatusEnumType.Accepted,
+        attributeType: resolvedAttributeType,
+        component,
+        variable,
+      }
+    }
+
+    if (variableMetadata.mutability === MutabilityEnumType.ReadOnly) {
+      return this.rejectSet(
+        variable,
+        component,
+        resolvedAttributeType,
+        SetVariableStatusEnumType.Rejected,
+        ReasonCodeEnumType.ReadOnly,
+        `Variable ${variable.name} is read-only`
+      )
+    }
+
+    // Enforce ConfigurationValueSize and ValueSize limits (only at set time).
+    // Effective limit selection rules (spec-aligned):
+    // 1. Read ConfigurationValueSize and ValueSize if present and valid (>0).
+    // 2. If both valid, use the smaller positive value.
+    // 3. If only one valid, use that value.
+    // 4. If neither valid/positive, fallback to spec maxLength (OCPP20Constants.MAX_VARIABLE_VALUE_LENGTH).
+    // 5. Enforce absolute upper cap of OCPP20Constants.MAX_VARIABLE_VALUE_LENGTH (spec).
+    // 6. Reject with TooLargeElement when attributeValue length strictly exceeds effectiveLimit.
+    if (resolvedAttributeType === AttributeEnumType.Actual) {
+      const configurationValueSizeKey = buildCaseInsensitiveCompositeKey(
+        OCPP20ComponentName.DeviceDataCtrlr,
+        undefined,
+        OCPP20OptionalVariableName.ConfigurationValueSize
+      )
+      const valueSizeKey = buildCaseInsensitiveCompositeKey(
+        OCPP20ComponentName.DeviceDataCtrlr,
+        undefined,
+        OCPP20OptionalVariableName.ValueSize
+      )
+      let configurationValueSizeRaw: string | undefined
+      let valueSizeRaw: string | undefined
+      if (!invalidVariables.has(configurationValueSizeKey)) {
+        configurationValueSizeRaw = getConfigurationKey(
+          chargingStation,
+          buildConfigKey(
+            OCPP20ComponentName.DeviceDataCtrlr,
+            OCPP20OptionalVariableName.ConfigurationValueSize
+          )
+        )?.value
+      }
+      if (!invalidVariables.has(valueSizeKey)) {
+        valueSizeRaw = getConfigurationKey(
+          chargingStation,
+          buildConfigKey(OCPP20ComponentName.DeviceDataCtrlr, OCPP20OptionalVariableName.ValueSize)
+        )?.value
+      }
+      const cfgLimit = convertToIntOrNaN(configurationValueSizeRaw ?? '')
+      const valLimit = convertToIntOrNaN(valueSizeRaw ?? '')
+      let effectiveLimit: number | undefined
+      if (!Number.isNaN(cfgLimit) && cfgLimit > 0) {
+        effectiveLimit = cfgLimit
+      }
+      if (!Number.isNaN(valLimit) && valLimit > 0) {
+        effectiveLimit = effectiveLimit != null ? Math.min(effectiveLimit, valLimit) : valLimit
+      }
+      if (effectiveLimit == null || effectiveLimit <= 0) {
+        effectiveLimit = OCPP20Constants.MAX_VARIABLE_VALUE_LENGTH
+      }
+      if (effectiveLimit > OCPP20Constants.MAX_VARIABLE_VALUE_LENGTH) {
+        effectiveLimit = OCPP20Constants.MAX_VARIABLE_VALUE_LENGTH
+      }
+      if (attributeValue.length > effectiveLimit) {
+        return this.rejectSet(
+          variable,
+          component,
+          resolvedAttributeType,
+          SetVariableStatusEnumType.Rejected,
+          ReasonCodeEnumType.TooLargeElement,
+          `Value length exceeds effective size limit (${effectiveLimit.toString()})`
+        )
+      }
+    }
+
+    // Narrow component.name and variable.name for enum-safe comparison
+    if (
+      isOCPP20ComponentName(component.name) &&
+      component.name === OCPP20ComponentName.AuthCtrlr &&
+      isOCPP20RequiredVariableName(variable.name) &&
+      variable.name === OCPP20RequiredVariableName.AuthorizeRemoteStart
+    ) {
+      const normalizedValue = attributeValue.toLowerCase()
+      if (normalizedValue !== 'true' && normalizedValue !== 'false') {
+        return this.rejectSet(
+          variable,
+          component,
+          resolvedAttributeType,
+          SetVariableStatusEnumType.Rejected,
+          ReasonCodeEnumType.InvalidValue,
+          'AuthorizeRemoteStart must be "true" or "false"'
+        )
+      }
+    } else {
+      const validation = validateValue(variableMetadata, attributeValue)
+      if (!validation.ok) {
+        return this.rejectSet(
+          variable,
+          component,
+          resolvedAttributeType,
+          SetVariableStatusEnumType.Rejected,
+          validation.reason ?? ReasonCodeEnumType.InvalidValue,
+          validation.info ?? 'Invalid value'
+        )
+      }
+      // Enforce dynamic MinSet/MaxSet overrides for integer values
+      if (variableMetadata.dataType === DataEnumType.integer) {
+        const num = convertToIntOrNaN(attributeValue)
+        if (!Number.isNaN(num)) {
+          const overrideMinRaw = this.getMinSetOverrides(stationId).get(variableKey)
+          const overrideMaxRaw = this.getMaxSetOverrides(stationId).get(variableKey)
+          if (overrideMinRaw != null) {
+            const overrideMin = convertToIntOrNaN(overrideMinRaw)
+            if (!Number.isNaN(overrideMin) && num < overrideMin) {
+              return this.rejectSet(
+                variable,
+                component,
+                resolvedAttributeType,
+                SetVariableStatusEnumType.Rejected,
+                ReasonCodeEnumType.ValueTooLow,
+                'Value below MinSet override'
+              )
+            }
+          }
+          if (overrideMaxRaw != null) {
+            const overrideMax = convertToIntOrNaN(overrideMaxRaw)
+            if (!Number.isNaN(overrideMax) && num > overrideMax) {
+              return this.rejectSet(
+                variable,
+                component,
+                resolvedAttributeType,
+                SetVariableStatusEnumType.Rejected,
+                ReasonCodeEnumType.ValueTooHigh,
+                'Value above MaxSet override'
+              )
+            }
+          }
+        }
+      }
+    }
+
+    let rebootRequired = false
+    const configurationKeyName = computeConfigurationKeyName(variableMetadata)
+    const previousValue = getConfigurationKey(chargingStation, configurationKeyName)?.value
+
+    if (
+      variableMetadata.persistence === PersistenceEnumType.Persistent &&
+      variableMetadata.mutability !== MutabilityEnumType.WriteOnly
+    ) {
+      const configKey = getConfigurationKey(chargingStation, configurationKeyName)
+      if (configKey == null) {
+        addConfigurationKey(chargingStation, configurationKeyName, attributeValue, undefined, {
+          overwrite: false,
+        })
+      } else if (configKey.value !== attributeValue) {
+        setConfigurationKeyValue(chargingStation, configurationKeyName, attributeValue)
+      }
+      rebootRequired =
+        (variableMetadata.rebootRequired === true ||
+          getConfigurationKey(chargingStation, configurationKeyName)?.reboot === true) &&
+        previousValue !== attributeValue
+    }
+    // Heartbeat & WS ping interval dynamic restarts
+    if (
+      variable.name === (OCPP20OptionalVariableName.HeartbeatInterval as string) &&
+      !Number.isNaN(convertToIntOrNaN(attributeValue)) &&
+      convertToIntOrNaN(attributeValue) > 0
+    ) {
+      chargingStation.restartHeartbeat()
+    }
+    if (
+      variable.name === (OCPP20OptionalVariableName.WebSocketPingInterval as string) &&
+      !Number.isNaN(convertToIntOrNaN(attributeValue)) &&
+      convertToIntOrNaN(attributeValue) >= 0
+    ) {
+      chargingStation.restartWebSocketPing()
+    }
+    // Apply volatile runtime override generically (single location)
+    if (variableMetadata.persistence === PersistenceEnumType.Volatile) {
+      this.getRuntimeOverrides(stationId).set(variableKey, attributeValue)
+    }
+
+    if (rebootRequired) {
+      return {
+        attributeStatus: SetVariableStatusEnumType.RebootRequired,
+        attributeStatusInfo: {
+          additionalInfo: 'Value changed, reboot required to take effect',
+          reasonCode: ReasonCodeEnumType.NoError,
+        },
+        attributeType: resolvedAttributeType,
+        component,
+        variable,
+      }
+    }
+
+    return {
+      attributeStatus: SetVariableStatusEnumType.Accepted,
+      attributeType: resolvedAttributeType,
+      component,
+      variable,
+    }
+  }
+}

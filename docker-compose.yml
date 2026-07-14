@@ -1,0 +1,87 @@
+networks:
+  ev_network:
+    driver: bridge
+
+services:
+  mlflow-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ml
+    container_name: mlflow-server
+    command: mlflow ui --backend-store-uri sqlite:////app/tests/ocpp-server/anomaly_detection/mlflow.db --host 0.0.0.0 --port 5000
+    volumes:
+      - .:/app
+    ports:
+      - "5050:5000"
+    networks:
+      - ev_network
+
+  bentoml-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ml
+    container_name: bentoml-service
+    command: bentoml serve pipeline:OCPPLogBERTService --port 3000 --host 0.0.0.0
+    working_dir: /app/tests/ocpp-server/anomaly_detection
+    volumes:
+      - .:/app
+    ports:
+      - "3000:3000"
+    networks:
+      - ev_network
+    depends_on:
+      - mlflow-server
+
+  ocpp-mock-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ml
+    container_name: ocpp-mock-server
+    command: python server.py --host 0.0.0.0 --port 9000 --auth-mode blacklist --blacklist INVALID_RFID_CARD_001 INVALID_RFID_CARD_002 INVALID_RFID_CARD_003
+    working_dir: /app/tests/ocpp-server
+    volumes:
+      - .:/app
+    ports:
+      - "9000:9000"
+    networks:
+      - ev_network
+    environment:
+      - BENTOML_URL=http://bentoml-service:3000/evaluate
+    depends_on:
+      - bentoml-service
+
+  simulator-backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        STACK_TRACE_LIMIT: 1024
+        MAX_OLD_SPACE_SIZE: 768
+    container_name: simulator-backend
+    volumes:
+      - ./docker/config.json:/usr/app/dist/assets/config.json
+    ports:
+      - "8080:8080"
+    networks:
+      - ev_network
+    depends_on:
+      - ocpp-mock-server
+
+  simulator-frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    container_name: simulator-frontend
+    volumes:
+      - .:/app
+      # Anonymous volumes to prevent host node_modules overrides in Alpine containers
+      - /app/node_modules
+      - /app/ui/web/node_modules
+      - /app/ui/common/node_modules
+      - /app/ui/cli/node_modules
+    ports:
+      - "5173:5173"
+    networks:
+      - ev_network
+    depends_on:
+      - simulator-backend
