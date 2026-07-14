@@ -23,7 +23,6 @@ An end-to-end, real-time anomaly detection and diagnostic pipeline for electric 
 8. [API & Metrics](#api--metrics)
 9. [Maintainers & Contributors](#maintainers--contributors)
 10. [Contributing](#contributing)
-11. [License](#license)
 
 ---
 
@@ -227,6 +226,3 @@ We welcome contributions! Please follow these guidelines:
 
 ---
 
-
-## License
-Distributed under the **MIT License**. See `LICENSE` for more information.
