@@ -226,3 +226,10 @@ We welcome contributions! Please follow these guidelines:
 
 ---
 
+## Acknowledgments & References
+
+This project builds upon and integrates several open-source technologies:
+- **EV Charging Simulator:** Adapted from SAP's open-source [e-mobility-charging-stations-simulator](https://github.com/SAP/e-mobility-charging-stations-simulator).
+- **Model Deployment & Inference:** Containerized and served using [BentoML](https://github.com/bentoml/BentoML).
+- **Experiment Tracking:** Machine learning metrics and hyperparameter tuning tracked using [MLflow](https://github.com/mlflow/mlflow).
+- **Core Diagnostics Model (LogBERT):** Based on the self-supervised LogBERT architecture for system log anomaly detection (see [LogBERT: Log Anomaly Detection via BERT](https://arxiv.org/abs/2103.03050)).
