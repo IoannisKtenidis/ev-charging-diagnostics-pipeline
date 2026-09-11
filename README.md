@@ -144,7 +144,14 @@ Arguments can be modified in [docker-compose.yml](file:///c:/e-mobility-charging
 
 ## Usage & Examples
 
-### 1. Access the Dashboards
+### 1. Run LogBERT Diagnostics Pipeline Test
+You can run the full unsupervised MLM training and evaluation loop directly:
+```bash
+python tests/ocpp-server/anomaly_detection/test_pipeline.py
+```
+This loads the baseline log dataset (`LOGS/ocpp-normal-dataset.jsonl`), trains LogBERT via self-supervised Masked Language Modeling, logs epoch metrics to MLflow, and verifies that injected anomaly sequences are accurately detected!
+
+### 2. Access the Dashboards
 * Open [http://localhost:5173](http://localhost:5173) in your browser. Refresh the page to verify that the simulator dashboard displays `CONNECTED` (green) and shows all 12 KeBa charging stations.
 * Open the Mock Server log stream to watch connections establish:
   ```bash

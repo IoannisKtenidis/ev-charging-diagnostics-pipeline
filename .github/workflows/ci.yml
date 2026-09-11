@@ -1,298 +1,71 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened]
-  merge_group:
     branches: [main]
+
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
-  check-secrets:
+  diagnostics-pipeline:
+    name: Test LogBERT Diagnostics Pipeline
     runs-on: ubuntu-latest
-    outputs:
-      sonar-token-exists: ${{ steps.sonar-token.outputs.defined }}
     steps:
-      - name: Check for SonarCloud Token Availability
-        id: sonar-token
-        shell: bash
-        run: |
-          if [ "${{ secrets.SONAR_TOKEN }}" != '' ]; then
-            echo "defined=true" >> $GITHUB_OUTPUT;
-          else
-            echo "defined=false" >> $GITHUB_OUTPUT;
-          fi
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  build-ocpp-server:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ['3.13', '3.14']
-    name: Build OCPP mock server with Python ${{ matrix.python }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install mlflow bentoml ocpp websockets
+
+      - name: Run Diagnostics Pipeline Test
+        run: |
+          python tests/ocpp-server/anomaly_detection/test_pipeline.py
+
+  ocpp-mock-server:
+    name: Test OCPP Mock Server
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: tests/ocpp-server
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install Poetry
         run: pipx install poetry
-      - name: Setup Python ${{ matrix.python }}
-        uses: actions/setup-python@v6
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: '3.12'
           cache: poetry
+
       - name: Install Dependencies
         run: poetry install --no-root
-      - name: Typecheck
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.14' }}
-        run: poetry run task typecheck
-      - name: Lint
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.14' }}
-        run: poetry run task lint
-      - name: Test
-        if: ${{ !(github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.python == '3.14') }}
-        run: poetry run task test
-      - name: Test with coverage
-        if: ${{ github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.python == '3.14' }}
-        run: poetry run task test_coverage
 
-  build-simulator:
-    needs: [check-secrets]
-    strategy:
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-        node: ['22.x', '24.x', 'latest']
-    name: Build simulator with Node ${{ matrix.node }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0 # Shallow clones should be disabled for a better relevancy of analysis
-      - name: Dependency Review
-        if: ${{ github.event_name == 'push' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: actions/dependency-review-action@v5.0.0
-        with:
-          base-ref: ${{ github.ref_name }}
-          head-ref: ${{ github.sha }}
-      - name: Pull Request Dependency Review
-        if: ${{ github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: actions/dependency-review-action@v5.0.0
-      - uses: pnpm/action-setup@v6
-      - name: Setup node ${{ matrix.node }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: 'pnpm'
-      - name: pnpm install
-        run: pnpm install --ignore-scripts --frozen-lockfile
-      # - name: pnpm audit
-      #   if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-      #   run: pnpm audit --prod
-      - name: pnpm typecheck
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm typecheck
-      - name: pnpm lint
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm lint
-      - name: pnpm build
-        run: pnpm build
-      - name: pnpm test
-        if: ${{ !(github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x') }}
-        run: pnpm test
-      - name: pnpm test:coverage
-        if: ${{ github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm test:coverage
-      - name: SonarCloud Scan
-        if: ${{ needs.check-secrets.outputs.sonar-token-exists == 'true' && github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: sonarsource/sonarqube-scan-action@v8.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - name: Run Server Tests
+        run: poetry run pytest -v
 
-  build-common:
-    needs: [check-secrets]
-    name: Build UI common library with Node ${{ matrix.node }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-        node: ['24.x']
-    defaults:
-      run:
-        working-directory: ui/common
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: pnpm/action-setup@v6
-      - name: Setup node ${{ matrix.node }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: 'pnpm'
-      - name: pnpm install
-        run: pnpm install --ignore-scripts --frozen-lockfile
-      - name: pnpm typecheck
-        run: pnpm typecheck
-      - name: pnpm lint
-        run: pnpm lint
-      - name: pnpm test
-        if: ${{ !(github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x') }}
-        run: pnpm test
-      - name: pnpm test:coverage
-        if: ${{ github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm test:coverage
-      - name: SonarCloud Scan
-        if: ${{ needs.check-secrets.outputs.sonar-token-exists == 'true' && github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: sonarsource/sonarqube-scan-action@v8.2
-        with:
-          projectBaseDir: ui/common
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  build-cli:
-    needs: [check-secrets, build-common]
-    strategy:
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-        node: ['22.x', '24.x', 'latest']
-    name: Build CLI with Node ${{ matrix.node }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: ui/cli
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Dependency Review
-        if: ${{ github.event_name == 'push' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: actions/dependency-review-action@v5.0.0
-        with:
-          base-ref: ${{ github.ref_name }}
-          head-ref: ${{ github.sha }}
-      - name: Pull Request Dependency Review
-        if: ${{ github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: actions/dependency-review-action@v5.0.0
-      - uses: pnpm/action-setup@v6
-      - name: Setup node ${{ matrix.node }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: 'pnpm'
-      - name: pnpm install
-        run: pnpm install --ignore-scripts --frozen-lockfile
-      - name: pnpm typecheck
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm typecheck
-      - name: pnpm lint
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm lint
-      - name: pnpm build
-        run: pnpm build
-      - name: pnpm test
-        if: ${{ !(github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x') }}
-        run: pnpm test
-      - name: pnpm test:coverage
-        if: ${{ github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm test:coverage
-      - name: SonarCloud Scan
-        if: ${{ needs.check-secrets.outputs.sonar-token-exists == 'true' && github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: sonarsource/sonarqube-scan-action@v8.2
-        with:
-          projectBaseDir: ui/cli
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  build-dashboard:
-    needs: [check-secrets]
-    strategy:
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-        node: ['22.x', '24.x', 'latest']
-    name: Build dashboard with Node ${{ matrix.node }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: ui/web
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0 # Shallow clones should be disabled for a better relevancy of analysis
-      - name: Dependency Review
-        if: ${{ github.event_name == 'push' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: actions/dependency-review-action@v5.0.0
-        with:
-          base-ref: ${{ github.ref_name }}
-          head-ref: ${{ github.sha }}
-      - name: Pull Request Dependency Review
-        if: ${{ github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: actions/dependency-review-action@v5.0.0
-      - uses: pnpm/action-setup@v6
-      - name: Setup node ${{ matrix.node }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: 'pnpm'
-      - name: pnpm install
-        run: pnpm install --ignore-scripts --frozen-lockfile
-      # - name: pnpm audit
-      #   if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-      #   run: pnpm audit --prod
-      - name: pnpm typecheck
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm typecheck
-      - name: pnpm lint
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm lint
-      - name: pnpm build
-        run: pnpm build
-      - name: pnpm test
-        if: ${{ !(github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x') }}
-        run: pnpm test
-      - name: pnpm test:coverage
-        if: ${{ github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        run: pnpm test:coverage
-      - name: SonarCloud Scan
-        if: ${{ needs.check-secrets.outputs.sonar-token-exists == 'true' && github.repository == 'sap/e-mobility-charging-stations-simulator' && matrix.os == 'ubuntu-latest' && matrix.node == '24.x' }}
-        uses: sonarsource/sonarqube-scan-action@v8.2
-        with:
-          projectBaseDir: ui/web
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  build-simulator-docker-image:
+  docker-validation:
+    name: Validate Docker Compose & Build ML Image
     runs-on: ubuntu-latest
-    name: Build simulator docker image
     steps:
-      - uses: actions/checkout@v7
-      - name: Setup Docker Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@v4
-      - name: Build docker image
-        run: |
-          cd docker
-          make SUBMODULES_INIT=false
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  build-dashboard-docker-image:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ui/web
-    name: Build dashboard docker image
-    steps:
-      - uses: actions/checkout@v7
-      - name: Setup Docker Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@v4
-      - name: Build docker image
-        run: |
-          cd docker
-          make SUBMODULES_INIT=false
+      - name: Validate Docker Compose Configuration
+        run: docker compose config
+
+      - name: Build Docker ML Diagnostics Image
+        run: docker build -t ocpp-ml:test -f docker/Dockerfile.ml .

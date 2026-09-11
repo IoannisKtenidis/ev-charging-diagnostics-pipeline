@@ -1,0 +1,4 @@
+{"timestamp": "2026-08-20T10:00:00Z", "stationId": "CS-001", "direction": "outgoing", "message": "[2, \"fault-01\", \"Authorize\", {\"idToken\": {\"idToken\": \"INVALID_RFID_CARD_001\", \"type\": \"Local\"}}]"}
+{"timestamp": "2026-08-20T10:00:01Z", "stationId": "CS-001", "direction": "incoming", "message": "[3, \"fault-01\", {\"idTokenInfo\": {\"status\": \"Blocked\"}}]"}
+{"timestamp": "2026-08-20T10:00:02Z", "stationId": "CS-001", "direction": "outgoing", "message": "[2, \"fault-02\", \"StatusNotification\", {\"connectorId\": 1, \"connectorStatus\": \"Faulted\", \"evseId\": 1}]"}
+{"timestamp": "2026-08-20T10:00:03Z", "stationId": "CS-001", "direction": "incoming", "message": "[4, \"fault-03\", \"ProtocolError\", \"Transaction not found\", {}]"}
