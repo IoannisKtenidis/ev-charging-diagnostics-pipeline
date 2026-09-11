@@ -221,7 +221,7 @@ class ChargePoint(ocpp.v201.ChargePoint):
             )
         else:
             self._auth_config = auth_config
-        self._message_history = []
+        self._message_history: list[str] = []
 
     async def route_message(self, raw_msg):
         self._message_history.append(raw_msg)
